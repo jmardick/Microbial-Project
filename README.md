@@ -1,2 +1,2 @@
 # Microbial-Project
-Repository for the Eberlin Lab bacterial identification project
+Repository for my scripts relating to the Eberlin Lab bacterial identification project.
