@@ -1,0 +1,618 @@
+---
+title: "Microbes -- Species"
+subtitle: "Multinomial Logistic Regression with LASSO Regularization"
+author: "Author: `r Sys.info()[['user']]`"
+date: "`r Sys.Date()`"
+knit: (function(inputFile, encoding) { 
+      out_dir <- paste0(format(Sys.time(), "%Y-%m-%d_%H.%M"),"_species_outputs");
+      if(!file.exists(file.path(out_dir))) {   dir.create(file.path(out_dir)) };
+      rmarkdown::render(inputFile,
+                        encoding=encoding, 
+                        output_file=file.path(dirname(inputFile), file.path(out_dir), paste0(Sys.Date(),"_microbes_species_lasso.html"))) 
+                        })
+output: 
+  html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, results = "hold")
+knitr::opts_chunk$set(strip.white = TRUE)
+knitr::opts_chunk$set(dev = "png",
+                      dpi = 300,
+                      echo = TRUE,
+                      cache = FALSE)
+```
+
+# **User Input**
+
+```{r User Input}
+peak_list <- "C:/Users/fjackobs/Box/Eberlin_Lab_BCM/People/MANOJ/GRAM_POSITIVE_NEGATIVE_ISOLATES/gram_negative_positive_peaks_25_apr_2024.xlsx"
+project_dir <- "C:/Users/fjackobs/Box/Eberlin_Lab_BCM/People/MANOJ/GRAM_POSITIVE_NEGATIVE_ISOLATES/excel_files"
+normalization_method <- "medianlog" ## tic, median, medianlog, maxpeak, or none
+train_fraction <- 0.8
+```
+
+# **Libraries**
+
+```{r Libraries, message = FALSE, warning = FALSE}
+library(rmarkdown)
+library(readxl)
+library(foreach)
+library(sqldf)
+library(dplyr)
+library(reshape2)
+library(johnfuncs)
+library(caret) ## automates supervised learning (predictive modeling)
+library(glmnet) ## for training, cross validation, and testing model
+library(pROC) ## for plotting ROC curve
+library(scales) ## for integer y-axis on histogram
+library(cividis)
+library(Polychrome)
+library(pheatmap)
+```
+
+```{r include = FALSE}
+## create directory for output files
+out_dir <- paste0(format(Sys.time(), "%Y-%m-%d_%H.%M"),"_species_outputs")
+if(!file.exists(file.path(out_dir))) {   dir.create(file.path(out_dir)) }
+```
+
+# **Peak Matching**
+
+To generate the same peak list for all samples.
+
+## **Read in peak list**
+
+Plus and minus 0.005 around peaks. Note: peak = m/z value = molecular feature
+
+```{r Peak List, message = FALSE, warning = FALSE}
+## read in target peaks excel file, no header
+mz_of_interest <- as.data.frame(read_excel(file.path(peak_list),col_names = FALSE))
+
+mz_interest_interval <- cbind(mz_of_interest,mz_of_interest[1] - 0.005,mz_of_interest[1] + 0.005)
+colnames(mz_interest_interval) <- c("target_mz","minus_005","plus_005")
+```
+
+## **Read in samples**
+
+```{r Samples}
+## Sub-directories for different classes of samples 
+classes <- gsub(file.path(project_dir, "/"), "", list.dirs(project_dir)[c(-1)], fixed=TRUE)
+
+## remove 'DowneyR' paths from list
+classes <- classes[!grepl('Downey', classes)]
+
+## remove unneeded parent directories from list (probably a better way to do this?)
+classes <- Filter(function(x) grepl("/",x), classes)
+classes <- classes[classes != "gram_positive/Staphylococcus"]
+
+## remove MSSA and MRSA from classes
+classes <- classes[!grepl('[^/]M*SA', classes)]
+classes <- classes[classes != "gram_positive/Streptococcus"]
+
+## List of species
+species <- lapply(classes, function(x) tools::file_path_sans_ext(basename(x)))
+
+## List of file paths
+file_path_list <- lapply(classes, function(x) list.files(path = file.path(project_dir,x), pattern = "*.xlsx", full.names = TRUE, recursive = TRUE))
+
+## remove empty paths (length zero) and remove species that have less than 15 samples
+keep_species <- lapply(file_path_list, function(x) length(x) > 15)
+species <- species[keep_species != "FALSE"]
+
+file_path_list <- Filter(function(x) length(x) > 15, file_path_list)
+
+## List of file names
+file_name_list <- lapply(file_path_list, function(x) tools::file_path_sans_ext(basename(x)))
+
+## Read m/z and intensity data into a list of tables, skip 7 header lines
+data_list <- lapply(file_path_list, function(x) lapply(x, function(y) read_excel(y,col_names = TRUE, skip = 7)))
+
+## Add file names to list
+data_list <- lapply(seq_along(data_list), \(i) setNames(data_list[[i]], file_name_list[[i]]))
+
+## Add class names to list
+names(data_list) <- species
+
+## Make sure all column headers are the same
+data_list <- lapply(data_list, function(x) lapply(x, setNames, c("Mass","Intensity")))
+```
+
+## **Match sample peaks to target peak intervals**
+
+```{r Peak Matching}
+peak_matched_list <- list()
+
+for (i in 1:length(data_list)) {
+  class_peak_matched_list <- list()
+  for (j in 1:length(data_list[[i]])) {
+    sample <- data_list[[i]][[j]]
+    matched_mz <- sqldf("SELECT mz_interest_interval.target_mz, sample.*
+                FROM sample,mz_interest_interval
+                WHERE sample.Mass between mz_interest_interval.minus_005 AND mz_interest_interval.plus_005")
+    class_peak_matched_list[[j]] <- matched_mz
+  }
+  peak_matched_list[[i]] <- class_peak_matched_list
+}
+
+## Add file names to list
+peak_matched_list <- lapply(seq_along(peak_matched_list), \(i) setNames(peak_matched_list[[i]], file_name_list[[i]]))
+
+## Add class names to list
+names(peak_matched_list) <- species
+```
+
+## **Sum intensities of duplicate peaks**
+
+Ex. The peaks 131.0809 and 131.0825 are both matched to the target peak 131.0826 (because they fall between the +/- 0.005 interval of 131.0776 to 131.0876). The individual peak intensities of 254.62488 and 6133.26633 are summed to equal 6387.8912.
+
+```{r Sum Intensities of Duplicate Peaks}
+## remove Mass column (observed mass)
+peak_matched_list <- lapply(peak_matched_list, function(x) lapply(x, function(y) y[ ,c(1,3)]))
+
+## sum intensities of duplicate target peaks.
+peak_matched_list <- lapply(peak_matched_list, function(x) lapply(x, function(y)aggregate(Intensity ~ ., data = y, FUN = sum)))
+```
+
+## **Combine all samples into one data frame**
+
+```{r Combine}
+## Combine list of sample dfs into one large df
+all_samples_df <- lapply(peak_matched_list, function(x) x %>% purrr::reduce(full_join, by="target_mz"))
+
+## Replace NA with zero
+all_samples_df <- lapply(all_samples_df, function(x) replace(x, is.na(x), 0))
+
+## Order by target_mz
+all_samples_df <- lapply(all_samples_df, function(x) x[order(x$target_mz), ])
+
+## Add file names as column names
+all_samples_df <- lapply(seq_along(all_samples_df), \(i) setNames(all_samples_df[[i]],c("target_mz",file_name_list[[i]])))
+
+## Add class names to list
+names(all_samples_df) <- species
+
+## Transpose df so samples are rows and peaks are columns (and peak values are column headers)
+t_all_samples_df <- lapply(all_samples_df, function(x) setNames(data.frame(t(x[,-1])), x[,1]))
+```
+
+
+```{r Create CSV file, include=FALSE}
+for (i in 1:length(t_all_samples_df)){
+  write.table(t_all_samples_df[[i]],file.path(out_dir,paste0(Sys.Date(),"_",species[[i]],"_peak_matched.csv")), row.names = TRUE, col.names = TRUE, sep = ",")
+}
+```
+
+## **xall, yall, filtered_mz objects**
+
+```{r xall and yall}
+## Combine samples of all classes into one df and transpose so samples are rows and peaks are columns
+xall <- data.frame(all_samples_df %>% purrr::reduce(full_join, by="target_mz"))
+
+## Order by target_mz
+xall <- xall[order(xall$target_mz), ]
+
+## transpose xall so samples are rows and peaks are columns (and peak values are column headers)
+xall <- t(xall)
+
+## save only matched mz
+filtered_mz <- unlist(xall[1, ])
+
+## Remove first row (target_mz)
+xall <- xall[-c(1), ]
+
+## replace NA with 0
+xall[is.na(xall)] <- 0
+
+## m/z as column names
+colnames(xall) <- filtered_mz
+
+## create yall object 
+yall <- foreach(i = 1:length(file_name_list), .combine = c) %do% {
+  rep(i, length(file_name_list[[i]])) }
+names(yall) <- unlist(file_name_list)
+
+## factorize yall
+yall <- factor(yall,levels=as.character(1:length(species)),labels = species)
+```
+
+## **Normalize Intensities**
+
+This uses johnfuncs.R
+
+```{r Normalize intensities}
+## normalize
+xall <- normalize_pixel(xall, normalization_method)
+```
+
+```{r save important R objects, include = FALSE}
+save(species, file_name_list, xall, yall, filtered_mz, 
+     file=file.path(out_dir, paste0(Sys.Date(),"_xall-yall-filtmz.RData")))
+```
+
+
+# **Logistic Regression with LASSO Regularization**
+
+LASSO regularization creates a sparse model by shrinking all smaller coefficients to zero and only keeping the most influential features in the model.
+
+## **The Data**
+
+This is data from pre-processing in the format of:\
+classes --\> character object of classes/groups/species to be predicted.\
+file_name_list --\> list of file names for the classes, matches nrow of xall and length of yall.\
+xall --\> large matrix of intensities with peaks as columns, observations as rows.\
+yall --\> observation classes (matches nrow of xall).\
+filtered_mz --\> peaks (matches ncol of xall).
+
+```{r eval = FALSE, include = FALSE}
+## If you want to load already created R objects
+## make sure file name is the one you want to load
+## change eval and include to TRUE in code chunk header
+
+#load(file.path(project_dir, out_dir, "xall-yall-filtmz.RData")) 
+```
+
+## **Split Data into Training and Testing Sets**
+
+Set training fraction to percent of samples to be in training set.\
+Default: 80% Training = 0.8\
+
+```{r Split Data into Training and Testing Sets}
+set.seed(1234)
+
+## splitting based on the outcomes
+train_partition <- createDataPartition(
+  yall,
+  p = train_fraction,
+  times = 2,
+  list = TRUE )
+
+train_index <- train_partition$Resample2
+
+## create training set
+xtrain <- as.matrix(xall[train_index, ])
+ytrain <- yall[train_index]
+
+## create testing set
+xtest <- as.matrix(xall[-train_index, ])
+ytest <- yall[-train_index]
+
+sample_names <- data.frame(unlist(file_name_list))
+```
+
+## **Training**
+
+This will be used when making predictions on the final model with optimized parameters from the cross-validation model.\
+
+```{r Multi-Class Training}
+model <- glmnet(
+  xtrain, 
+  ytrain, 
+  family = "multinomial", 
+  #type.multinomial = "grouped", ## which allows the usage of a grouped lasso penalty (q=2)
+  type.multinomial = "ungrouped",
+  alpha = 1, ## for lasso
+  standardize = FALSE, ## because intensities are already in same units
+  lambda.min.ratio = 1e-05 )
+## The model will compute its own lambda sequence based on nlambda and lambda.min.ratio 
+```
+
+```{r plot model coeff, include = FALSE}
+plot(model, xvar = "lambda", label = TRUE, type.coef = "2norm")
+```
+
+### **Cross Validation**
+
+Default number of folds is either 10 or nrow(xtrain) for Leave-One-Out CV.\
+Cross validation is used to optimize the lambda parameter (x-axis of plot) based on the misclassification (mean-square) error.\
+
+```{r Multi-Class Cross Validation, message = FALSE, warning = FALSE}
+## set number of folds
+nfolds <- 10
+#nfolds <- nrow(xtrain) ## leave-one-sample-out cross validation
+
+## cross validation
+cvmodel <- cv.glmnet(
+  xtrain, 
+  ytrain, 
+  nfolds = nfolds,
+  type.measure = "class", ## loss to use for binomial cross-validation, gives misclassification error
+  keep = TRUE, ## returns a prevalidated array containing fitted values 
+  ## for each observation and each value of lambda
+  family = "multinomial",
+  type.multinomial = "ungrouped",
+  alpha = 1, ## for lasso
+  standardize = FALSE, ## because intensities are already in same units
+  lambda.min.ratio = 1e-05 )
+
+plot(cvmodel)
+title("cross-validation curve : binomial family", line = 2.5)
+```
+
+```{r include = FALSE}
+save(model, cvmodel, filtered_mz, 
+     file=file.path(out_dir, paste0(Sys.Date(),"_model.RData")))
+
+ggsave(plot=last_plot(), filename = file.path(out_dir, paste0(Sys.Date(),"_cv_curve.png")))
+```
+
+### **Cross Validation Predictions**
+
+cvmodel\$fit.preval[,min_lambda_index] [returns predictions on the scale of the link function, which aren't probabilities](https://stackoverflow.com/questions/66624975/why-do-i-get-probabilities-outside-0-and-1-with-my-logistic-regularized-glmnet-c).\
+
+```{r Multi-Class CV predictions}
+## save index of lambda value that gives minimum cvm (mean cross-validated error)
+min_lambda_index <- which(cvmodel$lambda == cvmodel$lambda.min)
+
+## 1/(1+e^(-preval)) is the inverse of the link function?
+cv_predictions <- 1/(1+exp(-cvmodel$fit.preval[, , min_lambda_index]))
+
+## selects the best prediction for each sample
+cv_p_class <- apply(cv_predictions, 1, which.max)
+```
+
+```{r Multi-Class CV Predictions CM}
+## factorize cv_p_class
+cv_p_class <- factor(cv_p_class,levels=as.character(1:length(species)),labels = species)
+
+cv_cm <- table(True=ytrain, Predict=cv_p_class)
+```
+
+```{r write cv cm, include = FALSE}
+write.csv(cv_cm, 
+          file = file.path(out_dir, paste0(Sys.Date(),"_cv_cm.csv")))
+```
+
+```{r CV CM plot, fig.height=6, fig.width=6, message = FALSE}
+cv_cm_df <- as.data.frame(cv_cm)
+cv_cm_plot_df <- cv_cm_df %>%
+  mutate(plot.fill = case_when(
+    True == Predict ~ "TP",
+    True != Predict & Freq > 0 ~ "FP",
+    True != Predict & Freq == 0 ~ "TN"))
+
+ggplot(cv_cm_plot_df, aes(Predict, True, label = Freq, fill = plot.fill)) + 
+  geom_tile(color = "black") +
+  geom_text() +
+  scale_fill_manual(values = c("wheat2", "white", "lightgreen"))+
+  scale_x_discrete(position = "top") +
+  scale_y_discrete(limits = rev) +
+  theme(axis.text.x = element_text(angle = 90, hjust = 0, vjust = 0), 
+        plot.title.position = "plot",
+        legend.position = "none",
+        panel.grid = element_blank()) +
+  labs(title = "Classification of Bacterial Species - Training Set",
+       subtitle = "Logistic Regression with LASSO")
+
+calcAccuracy(cv_cm)
+```
+
+```{r fig.height=6, fig.width=6, message = FALSE, include = FALSE}
+cv_cm_df <- as.data.frame(cv_cm)
+
+ggplot(cv_cm_df, aes(Predict, True, fill = Freq, label = Freq)) + 
+  geom_tile() +
+  geom_text(aes(color = Freq)) +
+  scale_colour_gradientn(colors = c("wheat3","ivory2","midnightblue")) +
+  scale_fill_cividis() +
+  scale_x_discrete(position = "top") +
+  scale_y_discrete(limits = rev) +
+  theme(axis.text.x = element_text(angle = 90, hjust = 0, vjust = 0), 
+        plot.title.position = "plot",
+        legend.position = "none") +
+  labs(title = "Classification of Bacterial Species - Training Set",
+       subtitle = "Logistic Regression with LASSO")
+
+calcAccuracy(cv_cm)
+```
+
+```{r Training Dataframe, warning = FALSE, include = FALSE}
+ggsave(plot=last_plot(), 
+       filename = file.path(out_dir, paste0(Sys.Date(),"_cv_cm.png")),
+       width = 6,
+       height = 6,
+       units = c("in"))
+
+
+train_df <- data.frame(file_name=sample_names[train_index, ], 
+                       true_class=ytrain, 
+                       prediction_class=cv_p_class, 
+                       probability=cv_predictions)
+
+rownames(train_df) <- NULL
+
+write.table(train_df,file.path(out_dir, paste0(format(Sys.time(), "%Y-%m-%d_%H.%M"),"_train_df.csv")), row.names = FALSE, col.names = TRUE, sep = ",")
+```
+
+### **Multi-class Receiver Operating Curve (ROC)**
+
+```{r Multi-class AUC}
+## Can't plot all at once.
+roc_curve <- multiclass.roc(
+  ytrain, 
+  cv_predictions )
+
+roc_curve$auc
+```
+
+```{r Pretty colors and all ROC, include = FALSE, eval = FALSE, fig.height= 7, fig.width= 12}
+roc_colors <- createPalette(66, c("#ff0000", "#00ff00", "#0000ff"))
+#swatch(roc_colors)
+
+roc_comp <- names(roc_curve$rocs)
+
+plot.roc(roc_curve$rocs[[1]][[1]],
+         col = roc_colors[[1]],
+         print.auc = T,
+         print.auc.cex = 0.5,
+         print.auc.adj = c(0,-7),
+         legacy.axes = T,
+         main = "Multi-Class ROC Plot -- species 1/species 2 prediction")
+
+for (i in 2:length(roc_curve$rocs)) {
+  plot.roc(roc_curve$rocs[[i]][[1]],
+           add = T,
+           col = roc_colors[[i]],
+           print.auc = T,
+           print.auc.cex = 0.5,
+           print.auc.adj = c(0,-8+i))
+}
+op <- par(cex = 0.5)
+legend('bottomright',
+       legend = roc_comp,
+       col=roc_colors, lwd = 2)
+
+plot.roc(roc_curve$rocs[[1]][[2]],
+         col = roc_colors[[1]],
+         print.auc = T,
+         print.auc.cex = 0.5,
+         print.auc.adj = c(0,-5),
+         legacy.axes = T,
+         main = "Multi-Class ROC Plot -- species 2/species 1 prediction")
+for (i in 2:length(roc_curve$rocs)) {
+  plot.roc(roc_curve$rocs[[i]][[2]],
+           add = T,
+           col = roc_colors[[i]],
+           print.auc = T,
+           print.auc.cex = 0.5,
+           print.auc.adj = c(0,-6+i))
+}
+op <- par(cex = 0.5)
+legend('bottomright',
+       legend = roc_comp,
+       col=roc_colors, lwd = 2)
+```
+
+## **Testing**
+
+```{r Testing}
+test_p <- predict(model,
+                  xtest,
+                  s = cvmodel$lambda.min,
+                  type = "response" )
+```
+
+### **Confusion Matrix of Test Predictions**
+
+```{r Multi-Class Testing CM}
+test_p_class <- apply(test_p, 1, which.max)
+
+test_p_class <- factor(test_p_class,levels=as.character(1:length(species)),labels = species)
+
+test_cm <- table(True=ytest, Predict=test_p_class)
+```
+
+```{r write test cm, include = FALSE}
+write.csv(test_cm, 
+          file = file.path(out_dir, paste0(Sys.Date() ,"_test_cm.csv")))
+```
+
+```{r test cm plot, fig.height=6, fig.width=6, message = FALSE}
+test_cm_df <- as.data.frame(test_cm)
+test_cm_plot_df <- test_cm_df %>%
+  mutate(plot.fill = case_when(
+    True == Predict ~ "TP",
+    True != Predict & Freq > 0 ~ "FP",
+    True != Predict & Freq == 0 ~ "TN"))
+
+ggplot(test_cm_plot_df, aes(Predict, True, label = Freq, fill = plot.fill)) + 
+  geom_tile(color = "black") +
+  geom_text() +
+  scale_fill_manual(values = c("wheat2", "white", "lightgreen"))+
+  scale_x_discrete(position = "top") +
+  scale_y_discrete(limits = rev) +
+  theme(axis.text.x = element_text(angle = 90, hjust = 0, vjust = 0), 
+        plot.title.position = "plot",
+        legend.position = "none") +
+  labs(title = "Classification of Bacterial Species - Test Set",
+       subtitle = "Logistic Regression with LASSO")
+
+calcAccuracy(test_cm)
+```
+
+```{r fig.height=6, fig.width=6, message = FALSE, include = FALSE, eval = FALSE}
+test_cm_df <- as.data.frame(test_cm)
+
+ggplot(test_cm_df, aes(Predict, True, fill = Freq, label = Freq)) + 
+  geom_tile() +
+  geom_text(aes(color = Freq)) +
+  scale_colour_gradientn(colors = c("wheat3","ivory2","midnightblue")) +
+  scale_fill_cividis() +
+  scale_x_discrete(position = "top") +
+  scale_y_discrete(limits = rev) +
+  theme(axis.text.x = element_text(angle = 90, hjust = 0, vjust = 0), 
+        plot.title.position = "plot",
+        legend.position = "none") +
+  labs(title = "Classification of Bacterial Species - Testing Set",
+       subtitle = "Logistic Regression with LASSO")
+
+calcAccuracy(test_cm)
+```
+
+```{r Test Dataframe, include = FALSE, warning = FALSE}
+ggsave(plot=last_plot(), 
+       filename = file.path(out_dir, paste0(Sys.Date(),"_test_cm.png")),
+       width = 6,
+       height = 6,
+       units = c("in"))
+
+test_df <- data.frame(file_name=sample_names[-c(train_index), ], 
+                      true_class=ytest, 
+                      prediction_class=factor(test_p_class), 
+                      probability=as.numeric(test_p))
+
+rownames(test_df) <- NULL
+
+write.table(test_df,file.path(out_dir, paste0(format(Sys.time(), "%Y-%m-%d_%H.%M"),"_test_df.csv")), row.names = FALSE, col.names = TRUE, sep = ",")
+```
+
+## **Report Model Coefficients**
+
+The reportCoef function from the "johnfuncs.R" script will be used for this, because no need to rewrite the wheel.
+
+```{r reportCoef function, include = FALSE}
+reportCoef <- function(fit, lambda, filteredMZ, labels) {
+  coef <- unlist(predict(fit, s = lambda, type = "coefficients"))
+  if(is.list(coef)){
+    coefTable <- as.matrix(do.call(cbind, coef))
+  } else {
+    coefTable <- coef
+  }
+  rownames(coefTable) <- c("Intercept", filteredMZ)
+  if(is.list(coef)){
+    colnames(coefTable) <- labels
+  } else {
+    colnames(coefTable) <- labels[2]
+  }
+  
+  zeroIdx <- rowSums(abs(coefTable))
+  filteredTable <- as.data.frame(as.matrix(coefTable[!zeroIdx==0,, drop = FALSE]))
+  filteredTable$MaxIntensityNorm <- c(0,apply(xall[,filteredMZ %in% rownames(filteredTable)[-1], drop=FALSE], 2, max))
+  filteredTable$MinIntensityNorm <- c(0,apply(xall[,filteredMZ %in% rownames(filteredTable)[-1], drop=FALSE], 2, min))
+  if(exists("xallOrig")){
+    filteredTable$MaxIntensity <- c(0,apply(xallOrig[,filteredMZ %in% rownames(filteredTable)[-1], drop=FALSE], 2, max))
+    filteredTable$MinIntensity <- c(0,apply(xallOrig[,filteredMZ %in% rownames(filteredTable)[-1], drop=FALSE], 2, min))
+  }
+  filteredTable
+}
+```
+
+```{r Report Model Coefficients}
+
+model_coeff <- as.data.frame(reportCoef(model, cvmodel$lambda.min, filtered_mz, species))
+
+paged_table(model_coeff, options = list(rows.print = 20, cols.print = 13))
+```
+
+```{r write coeff, include=FALSE}
+write.csv(model_coeff, 
+          file.path(out_dir, paste0(Sys.Date(), "_coefficients.csv")))
+```
+
+# **Session Info**
+
+```{r Session Info}
+sessionInfo()
+```

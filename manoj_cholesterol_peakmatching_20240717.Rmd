@@ -1,0 +1,161 @@
+---
+title: "Manoj PDAC Dominik Cholesterol Peaks"
+author: "Jacob Mardick"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Libraries
+
+``` {r libraries, message=FALSE, warning=FALSE, echo=FALSE}
+library(dplyr)
+library(tidyr)
+library(readr)
+library(sqldf)
+library(parallel)
+library(doParallel)
+library(foreach)
+library(gtools)
+library(writexl)
+```
+
+## User Input
+
+``` {r settings, echo = FALSE}
+normMethod <- "tic"
+mz_of_interest <- c(175.0248, 215.0328, 255.233, 279.233, 281.2486, 303.233, 514.2844, 736.6461, 744.5549, 747.5182, 788.5447, 794.5472, 817.5025, 819.5182, 841.5025, 865.5025, 885.5499)
+tolerance <- 0.005
+
+source('../mspreprocess/src/preprocfunctions.R')
+```
+
+## Preprocessing
+
+``` {r preprocess, echo=FALSE}
+## Parent directory for samples
+directory <- "C:/Users/Jacob/Box/Eberlin_Lab_BCM/People/MANOJ/PDAC_DOMINIK/Ready for R/Samples"
+
+## Sub-directories for different classes of samples (e.g., tumor/healthy, resistant/sensitive)3
+
+classes <- gsub(file.path(directory, ""), "", list.dirs(directory)[c(-1)], fixed=TRUE)
+
+## List of file names paths
+fileNameList <- lapply(classes, function(x) list.files(path = file.path(directory,x), pattern = "*.csv", full.names = TRUE))
+
+## Ensure patient ordering is consistent across different OSes.
+fileNameList <- lapply(fileNameList, sort)
+
+## Reads m/z and intensity data into a list of tables
+dataList <- lapply(fileNameList, function(x) read_files(x))
+
+## Reads header information (Scan, x, y, z, TIC)
+pixelInfoList <- mapply(function(x,y) read_headers(x,y), x=fileNameList, y=classes, SIMPLIFY = FALSE)
+
+## Create list of tables of m/z peaks
+classMZList <- lapply(dataList, function(x) round(sort(extract_peaks(x)), 3))
+
+## Turn list of tables into one list of all m/z peaks
+allMZ <- sort(unlist(classMZList))
+```
+
+## Rename columns in dataList
+
+``` {r rename datalist columns}
+## Function
+rename_columns <- function(data) {
+  colnames(data) <- rep(c("m/z", "Intensity"), ncol(data) / 2)
+  return(data)
+}
+
+## Rename dataList columns
+dataList <- lapply(dataList, function(class_data) {
+  lapply(class_data, rename_columns)
+})
+```
+
+## Function to find m/z peaks of interest
+
+``` {r peak function}
+find_peaks <- function(data, mz_values, tolerance) {
+  result <- lapply(mz_values, function(mz) {
+    matches <- abs(data[["m/z"]] - mz) <= tolerance
+    if (any(matches, na.rm = TRUE)) {
+      mean(data[["Intensity"]][matches], na.rm = TRUE)
+    } else {
+      NA
+    }
+  })
+  return(result)
+}
+```
+
+## Function to calculate average intensity for each m/z across pixels per sample
+
+``` {r average intensity per sample function}
+average_intensity_per_sample_parallel <- function(data_list, mz_values, tolerance, classes, file_names) {
+  cl <- makeCluster(detectCores() - 1) # Use one less than the number of available cores
+  registerDoParallel(cl)
+  
+  clusterEvalQ(cl, {
+    library(dplyr)
+    library(tidyr)
+  })
+  
+  clusterExport(cl, list("find_peaks", "mz_of_interest", "tolerance"))
+  
+  result <- foreach(i = seq_along(data_list), .combine = rbind, .packages = c('dplyr', 'tidyr')) %dopar% {
+    if(length(data_list[[i]]) > 0) { # Check if there are samples in the class
+      sample_results <- lapply(seq_along(data_list[[i]]), function(j) {
+        peaks <- data_list[[i]][[j]]
+        if(!is.null(peaks) && nrow(peaks) > 0) { # Check if the sample dataframe is not empty
+          matched_peaks <- find_peaks(peaks, mz_values, tolerance)
+          intensities <- sapply(seq_along(mz_values), function(k) {
+            if (!is.na(matched_peaks[[k]])) {
+              mean(matched_peaks[[k]], na.rm = TRUE)
+            } else {
+              NA
+            }
+          })
+          data.frame(Class = classes[i], Sample = basename(file_names[[i]][j]), mz_value = mz_values, Average_Intensity = intensities)
+        } else {
+          NULL
+        }
+      })
+      do.call(rbind, sample_results)
+    } else {
+      NULL
+    }
+  }
+  
+  stopCluster(cl)
+  return(result)
+}
+
+average_intensity_df <- average_intensity_per_sample_parallel(dataList, mz_of_interest, tolerance, classes, fileNameList)
+```
+
+## Export to excel in wide format
+
+``` {r export to excel}
+## Pivot wider for excel
+wide_average_intensity <- pivot_wider(average_intensity_df, names_from = mz_value, values_from = Average_Intensity)
+
+## Alphanumerically order samples
+wide_average_intensity <- wide_average_intensity[gtools::mixedorder(wide_average_intensity$Sample), ]
+
+## Export to Excel file
+output_directory <- "C:/Users/Jacob/Box/Eberlin_Lab_BCM/People/MANOJ/PDAC_DOMINIK/Ready for R"
+output_file <- file.path(output_directory, "Dominik Untargeted metabolites.xlsx")
+#write_xlsx(wide_average_intensity, output_file)
+```
+
+
+
+
+
+
+

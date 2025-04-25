@@ -1,0 +1,1153 @@
+---
+title: "Gram Stain Prediction of Cultured Isolates"
+subtitle: "Positive and Negative Combined Analysis w/ peak lists"
+author: "`r Sys.info()[['user']]`"
+date: "`r format(Sys.time(), '%B %d, %Y %H:%M')`"
+knit: (function(inputFile, encoding) { 
+      proj_name <- tools::file_path_sans_ext(basename(inputFile));
+      out_dir <- paste0(proj_name, "_", Sys.Date());
+      if(!file.exists(out_dir)) {   dir.create(out_dir) };
+      rmarkdown::render(inputFile,
+                        encoding=encoding, 
+                        output_file=file.path(dirname(inputFile), 
+                        out_dir, 
+                        paste0(format(Sys.time(), "%Y-%m-%d_%H.%M"),"_", proj_name, ".html"))) 
+                        })
+
+output: 
+  html_document:
+    keep_md: yes
+    df_print: paged
+    toc: false
+geometry: margin=0.5in
+editor_options: 
+  markdown: 
+    wrap: 72
+---
+
+```{=html}
+<style type="text/css">
+.main-container {
+max-width: 1600px;
+margin-left: auto;
+margin-right: auto;
+}
+</style>
+```
+
+```{css, echo=FALSE}
+h1, h2, h3, h4, h5, p {
+text-align: center;
+}
+```
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(message = FALSE, warning = FALSE, echo = FALSE, cache = FALSE)
+```
+
+```{r libraries, message = FALSE, warning = FALSE}
+library(rmarkdown)
+library(knitr)
+library(kableExtra)
+library(ggpubr)
+
+library(tidyverse)
+library(reshape2)
+library(readxl)
+library(rawrr)
+library(sqldf)
+
+library(stringr)
+library(doParallel)
+library(fcluster)
+library(johnfuncs)
+
+library(caret) ## automates supervised learning (predictive modeling)
+library(glmnet) ## for training, cross validation, and testing model
+library(pROC) ## for plotting ROC curve
+library(scales) ## for integer y-axis on histogram
+```
+
+```{r user input}
+## Separated Into Negative and Positive Mode Directories
+
+## Full path to folder with sample files (excel or csv, or raw Thermo files)
+## PASTE PATH IN BETWEEN INNER PARENTHASIS WITH QUOTES ON THE OUTSIDE -- NO NEED TO CHANGE BACKSLASHES TO FORWARD SLASHES
+sample_dir <- list(
+  neg = gsub("\\\\", "/", r"(C:\Users\Jacob\Box\Eberlin_Lab_BCM\Projects\Bacterial Identification\data\pos-neg_matched\Pure_Isolates\negative_mode)"),
+  pos = gsub("\\\\", "/", r"(C:\Users\Jacob\Box\Eberlin_Lab_BCM\Projects\Bacterial Identification\data\pos-neg_matched\Pure_Isolates\positive_mode)")
+)
+
+## Full path to feature list, otherwise NULL
+feature_file <- list(
+  neg = gsub("\\\\", "/", r"(C:\Users\Jacob\Box\Eberlin_Lab_BCM\Projects\Bacterial Identification\feature_peak_lists\20250130_combined_tsm_manoj_gram_features.xlsx)"),
+  pos = gsub("\\\\", "/", r"(C:\Users\Jacob\Box\Eberlin_Lab_BCM\Projects\Bacterial Identification\feature_peak_lists\Positive-features_Manoj-curated.xlsx)")
+)
+
+## Full path to background peak list, otherwise NULL
+background_file <- list(
+  neg = NULL,
+  pos = NULL
+)
+## ---------------------------------------------------------------------------
+## Scan numbers to import when using raw Thermo files
+scans <- 50:500 ## number of scans to extract from each raw file
+
+## Mass range to filter
+mass_range <- c(100,2000)
+
+## Peak Alignment Method: "clustering" or "featurelist"
+peak_alignment_method <- "featurelist"
+
+## If peak alignment method is "clustering":
+clust_h <- 0.05 ## Height at which to cut dendrogram to determine clusters
+clust_int_method  <-  "sumints" ## Handling of multiple intensities aggregating to one cluster centroid: "sumints" or "maxint"
+
+## If peak alignment method is "featurelist":
+ppm_error <- 5 ## Mass error tolerance of sample peaks to match to feature peaks
+
+## Normalization Method: "tic", "maxpeak", "median", "medianlog", or "none"
+normalization_method <- "tic" 
+
+## ---------------------------------------------------------------------------
+
+## Fraction of samples to use for training lasso model
+train_fraction <- 0.7
+
+## Randomization seed
+seed <- 1234
+```
+
+```{r create directory for output files, include = FALSE}
+proj_name <- tools::file_path_sans_ext(basename(rstudioapi::getSourceEditorContext()$path))
+
+out_dir <- paste0(proj_name, "_", Sys.Date())
+
+if(!file.exists(out_dir)) {   dir.create(out_dir) }
+
+files_dir <- paste0(format(Sys.time(), "%Y-%m-%d_%H.%M"), "_", proj_name, "_files")
+
+if(!file.exists(file.path(out_dir,files_dir))) {   dir.create(file.path(out_dir,files_dir)) }
+```
+
+```{r classes}
+## read sub-directories for class names
+classes <- list(
+  neg = basename(list.dirs(sample_dir$neg, recursive=FALSE)),
+  pos = basename(list.dirs(sample_dir$pos, recursive=FALSE))
+)
+
+## fixed objects for exporting to parallel computing
+fixed_objects <- list(scans = scans, mass_range = mass_range)
+```
+
+```{r file extension}
+## check file extension
+sample_file_ext <- unique(unlist(
+  lapply(classes, function(x) 
+    tools::file_ext(list.files(file.path(sample_dir, "/",x,"/"))))))[1]
+```
+
+```{r file and sample names}
+## file names
+file_name_list <- list(
+  neg = lapply(classes$neg, function(x) list.files(path = file.path(sample_dir$neg,x), pattern = paste0("*.", sample_file_ext), full.names = TRUE)),
+  pos = lapply(classes$pos, function(x) list.files(path = file.path(sample_dir$pos,x), pattern = paste0("*.", sample_file_ext), full.names = TRUE))
+)
+
+## Ensure patient ordering is consistent across different OSes.
+file_name_list <- list(
+  neg = setNames(
+    lapply(classes$neg, function(x) {
+      list.files(path = file.path(sample_dir$neg, x), pattern = paste0("*.", sample_file_ext), full.names = TRUE)
+    }), classes$neg),
+  pos = setNames(
+    lapply(classes$pos, function(x) {
+      list.files(path = file.path(sample_dir$pos, x), pattern = paste0("*.", sample_file_ext), full.names = TRUE)
+    }), classes$pos)
+)
+
+## sample names
+sample_names_list <- list(
+  neg = lapply(file_name_list$neg, function(x) tools::file_path_sans_ext(basename(x))),
+  pos = lapply(file_name_list$pos, function(x) tools::file_path_sans_ext(basename(x)))
+)
+names(sample_names_list$neg) <- classes$neg
+names(sample_names_list$pos) <- classes$pos
+sample_names <- unlist(sample_names_list)
+## Unnest sample_names_list into a long format
+sample_names_df <- purrr::map2_df(
+  names(sample_names_list), sample_names_list, 
+  ~ tibble(mode = .x, class = rep(names(.y), lengths(.y)), sample_name = unlist(.y))
+)
+colnames(sample_names_df) <- c("mode", "class", "sample_name")
+```
+
+```{r process function}
+if (sample_file_ext == "xlsx") {
+  
+  process_xlsx <- function(file_name_list, fixed_objects) {
+    cl <- makeCluster(detectCores() - 1) # Use one less than the number of available cores
+    registerDoParallel(cl)
+    
+    clusterEvalQ(cl, {
+      library(dplyr)
+      library(readxl)
+      library(purrr)
+    })
+    
+    result <- foreach(mode = names(file_name_list), .combine = "list", .packages = c('dplyr', 'readxl', 'purrr')) %:%
+      foreach(class = names(file_name_list[[mode]]), .combine = "list") %dopar% {
+        
+        lapply(file_name_list[[mode]][[class]], function(file) {
+          ## Read the spectrum data with multiple format handling
+          spectrum <- tryCatch(
+            read_excel(file, col_names = c("mass", "intensity"), skip = 8),
+            error = function(e) tryCatch(
+              read_excel(file, col_names = c("mass", "intensity", "relative"), skip = 8),
+              error = function(e) tryCatch(
+                read_excel(file, col_names = c("mass", "intensity", "relative", "noise"), skip = 8),
+                error = function(e) return(NULL)
+              )
+            )
+          )
+          
+          ## Ensure spectrum is not NULL
+          if (is.null(spectrum)) return(NULL)
+          
+          ## FILTER #1: RETAIN PEAKS WITHIN MASS RANGE
+          spectrum <- spectrum %>% filter(mass >= fixed_objects$mass_range[1], mass <= fixed_objects$mass_range[2])
+          
+          ## FILTER #2: RETAIN PEAKS WITH SNR >= 3 (if noise column exists)
+          if ("noise" %in% colnames(spectrum)) {
+            spectrum <- spectrum %>%
+              mutate(SNR = intensity / noise) %>%
+              filter(SNR >= 3) %>%
+              select(-c(relative, noise, SNR), everything())
+          } else if ("relative" %in% colnames(spectrum)) {
+            spectrum <- spectrum %>% select(-relative)
+          }
+          
+          return(spectrum)
+        })
+      }
+    
+    stopCluster(cl)
+    
+    ## Explicitly assign class names at the second level
+    result <- setNames(result, names(file_name_list))
+    return(result)
+  }
+  
+  ## Process spectra data
+  spectra_list <- process_xlsx(file_name_list, fixed_objects)
+  
+  ## Set sample names and classes
+  # Ensure spectra_list structure before applying names
+  if (!is.null(spectra_list$neg) && length(spectra_list$neg) > 0) {
+    names(spectra_list$neg) <- names(file_name_list$neg)  # Assign class names to neg
+    for (class in names(spectra_list$neg)) {
+      if (length(spectra_list$neg[[class]]) == length(sample_names_list$neg[[class]])) {
+        names(spectra_list$neg[[class]]) <- sample_names_list$neg[[class]]
+      } else {
+        warning(paste("Mismatch in length for NEG class:", class))
+      }
+    }
+  }
+
+  if (!is.null(spectra_list$pos) && length(spectra_list$pos) > 0) {
+    names(spectra_list$pos) <- names(file_name_list$pos)  # Assign class names to pos
+    for (class in names(spectra_list$pos)) {
+      if (length(spectra_list$pos[[class]]) == length(sample_names_list$pos[[class]])) {
+        names(spectra_list$pos[[class]]) <- sample_names_list$pos[[class]]
+      } else {
+        warning(paste("Mismatch in length for POS class:", class))
+      }
+    }
+  }
+
+  names(spectra_list) <- names(file_name_list)  # Ensure top-level "neg" and "pos" names are set
+}
+```
+
+```{r peak alignment clustering}
+## Clustering is not working properly, need to update to use (JIM 20250317)
+## If peak alignment method is clustering
+if (peak_alignment_method == "clustering") {
+  
+  all_mz <- list(neg = NULL, pos = NULL) 
+  
+  ## Function to process peaks for a given mode
+  process_peaks_for_mode <- function(mode, spectra_list, background_file) {
+    if (!is.null(background_file[[mode]])) { 
+      bg_mz <- unlist(read.csv(background_file[[mode]], header = FALSE))
+      
+      sample_mz <- sort(unlist(
+        lapply(spectra_list[[mode]], function(y)
+          lapply(y, function(x)
+            round(x$mass, 3)))))
+      
+      all_mz_mode <- c(bg_mz, sample_mz)
+      names(all_mz_mode) <- all_mz_mode
+      
+    } else { ## If no background peak list
+      all_mz_mode <- sort(unlist(
+        lapply(spectra_list[[mode]], function(y)
+          lapply(y, function(x)
+            round(x$mass, 3)))))
+      names(all_mz_mode) <- all_mz_mode
+    }
+    
+    return(all_mz_mode)
+  }
+  
+  ## Process peaks for both positive and negative modes
+  all_mz$neg <- process_peaks_for_mode("neg", spectra_list, background_file)
+  all_mz$pos <- process_peaks_for_mode("pos", spectra_list, background_file)
+
+  ## Function to cluster peaks and get cluster centroids
+  cluster_peaks <- function(mz_values, clust_h) {
+    tree <- fcluster(mz_values)
+    clust_mz <- fcutree(mz_values, tree, h=clust_h)
+    return(sort(clust_mz$cen))
+  }
+
+  ## Cluster peaks for both modes
+  clustMZ <- list(
+    neg = cluster_peaks(all_mz$neg, clust_h),
+    pos = cluster_peaks(all_mz$pos, clust_h)
+  )
+
+  ## Match cluster centroids to sample peaks for both modes
+  clusterMatrixList <- list(
+    neg = lapply(spectra_list$neg, function(x) get_cluster_matrix(x, clustMZ$neg, clust_h, clust_int_method)),
+    pos = lapply(spectra_list$pos, function(x) get_cluster_matrix(x, clustMZ$pos, clust_h, clust_int_method))
+  )
+
+  ## Convert to matrices
+  preprocList <- list(
+    neg = lapply(clusterMatrixList$neg, function(x) as.matrix(get_data_matrix_clustering(x))),
+    pos = lapply(clusterMatrixList$pos, function(x) as.matrix(get_data_matrix_clustering(x)))
+  )
+
+  ## Align spectra for both modes
+  aligned_spectra <- list(
+    neg = do.call(rbind, preprocList$neg),
+    pos = do.call(rbind, preprocList$pos)
+  )
+
+  ## Assign column and row names
+  colnames(aligned_spectra$neg) <- clustMZ$neg
+  colnames(aligned_spectra$pos) <- clustMZ$pos
+  rownames(aligned_spectra$neg) <- sample_names
+  rownames(aligned_spectra$pos) <- sample_names
+
+  ## FILTER #3: REMOVE RARE/UNCOMMON PEAKS PRESENT < 10% SAMPLES
+  mz_count_filter <- list(
+    neg = colSums(aligned_spectra$neg != 0) > as.integer(nrow(aligned_spectra$neg) * 0.10),
+    pos = colSums(aligned_spectra$pos != 0) > as.integer(nrow(aligned_spectra$pos) * 0.10)
+  )
+
+  aligned_spectra <- list(
+    neg = aligned_spectra$neg[, mz_count_filter$neg],
+    pos = aligned_spectra$pos[, mz_count_filter$pos]
+  )
+
+  ## FILTER #4: REMOVE BACKGROUND PEAKS (IF BACKGROUND FILE PRESENT)
+  if (!is.null(background_file$neg) || !is.null(background_file$pos)) {
+    
+    filter_background_peaks <- function(mode, background_file, clustMZ, all_mz, aligned_spectra) {
+      if (!is.null(background_file[[mode]])) {
+        bg_mz <- unlist(read.csv(background_file[[mode]], header = FALSE))
+        
+        temp_a <- data.frame(cluster_id = clustMZ[[mode]]$cluster_index, all_mz = all_mz[[mode]])
+        temp_b <- data.frame(clust_centroid = clustMZ[[mode]]$centroid, 
+                             cluster_id = unique(clustMZ[[mode]]$cluster_index)[order(unique(clustMZ[[mode]]$cluster_index))])
+        
+        temp_c <- merge(temp_a, temp_b, by = "cluster_id")
+        
+        bg_centroids <- unique(temp_c[temp_c$all_mz %in% bg_mz, ])
+        
+        ## Remove peaks from aligned_spectra that are in bg_mz_centroid
+        aligned_spectra <- aligned_spectra[, !(colnames(aligned_spectra) %in% bg_centroids$clust_centroid)]
+      }
+      return(aligned_spectra)
+    }
+    
+    ## Apply background peak filtering
+    aligned_spectra$neg <- filter_background_peaks("neg", background_file, clustMZ, all_mz, aligned_spectra$neg)
+    aligned_spectra$pos <- filter_background_peaks("pos", background_file, clustMZ, all_mz, aligned_spectra$pos)
+  }
+
+  ## Extract final filtered m/z values
+  filtered_mz <- list(
+    neg = as.numeric(colnames(aligned_spectra$neg)),
+    pos = as.numeric(colnames(aligned_spectra$pos))
+  )
+}
+```
+
+```{r peak alignment feature list}
+if (peak_alignment_method == "featurelist") {
+  
+  if (is.null(feature_file$neg) || is.null(feature_file$pos)) {
+    print("No path specified for feature list. Add paths to both positive and negative mode feature files or choose a different peak alignment method.")
+  } else {
+    
+    ## Load required libraries
+    library(readxl)
+    library(dplyr)
+    library(tidyr)
+    library(foreach)
+    library(doParallel)
+    library(sqldf)
+
+    ## Read feature peak files for both modes
+    feature_df <- list(
+      neg = read_excel(feature_file$neg, col_names = TRUE),
+      pos = read_excel(feature_file$pos, col_names = TRUE)
+    )
+
+    ## Extract and format feature peaks
+    feature_peaks_list <- lapply(feature_df, function(df) {
+      feature_peaks <- unlist(df[,1])  # Extract feature mass column
+
+      ## Compute mass error range
+      mass_error <- (ppm_error * feature_peaks) / 1e6
+
+      feature_peaks_df <- data.frame(
+        feature_mass = feature_peaks,
+        mass_error = mass_error,
+        mass_error_lower = round(feature_peaks - mass_error, 3),
+        mass_error_upper = round(feature_peaks + mass_error, 3)
+      )
+
+      ## Reset rownames
+      rownames(feature_peaks_df) <- NULL
+      return(feature_peaks_df)
+    })
+
+    ## Store fixed objects for parallel computing
+    fixed_objects <- list(
+      neg = list(mass_range = mass_range, feature_peaks = feature_peaks_list$neg),
+      pos = list(mass_range = mass_range, feature_peaks = feature_peaks_list$pos)
+    )
+
+    ## 🛠 Feature Peak Alignment Function
+    feature_peak_alignment <- function(spectra_list, fixed_objects) {
+      cl <- makeCluster(detectCores() - 1) # Use one less than the number of available cores
+      registerDoParallel(cl)
+      
+      clusterEvalQ(cl, {
+        library(dplyr)
+        library(sqldf)
+      })
+      
+      #clusterExport(cl, list("feature_peaks"))
+      
+      result <- foreach(i = seq_along(spectra_list), .packages = c('dplyr', 'sqldf')) %:% 
+        foreach(j = seq_along(spectra_list[[i]])) %dopar% {
+          
+          spectrum <- spectra_list[[i]][[j]]
+          feature_peaks <- fixed_objects$feature_peaks
+          
+          feature_matched_spectrum <- sqldf("SELECT feature_peaks.feature_mass, spectrum.*
+          FROM spectrum,feature_peaks
+          WHERE spectrum.mass between feature_peaks.mass_error_lower AND feature_peaks.mass_error_upper")
+          
+          ## remove mass columns
+          feature_matched_spectrum <- subset(feature_matched_spectrum, select = -c(mass))
+          
+          ## sum intensities of duplicates
+          feature_matched_spectrum <- aggregate(intensity ~ ., data = feature_matched_spectrum, FUN = sum)
+        }
+      stopCluster(cl)
+      return(result)
+    }
+      
+    feature_matched_spectra <- list(
+      neg = feature_peak_alignment(spectra_list$neg, fixed_objects$neg),
+      pos = feature_peak_alignment(spectra_list$pos, fixed_objects$pos)
+    )
+    
+    ## Turn list of lists into dataframe
+    feature_matched_spectra <- list(
+      neg = lapply(feature_matched_spectra$neg, function(x) x |> 
+                     reduce(full_join, by = "feature_mass")) |> 
+        reduce(full_join, by = "feature_mass"),
+      pos = lapply(feature_matched_spectra$pos, function(x) x |> 
+                     reduce(full_join, by = "feature_mass")) |> 
+        reduce(full_join, by = "feature_mass")
+    )
+    
+    ## Sort by target_mz
+    feature_matched_spectra <- list(
+      neg = feature_matched_spectra$neg[order(feature_matched_spectra$neg$feature_mass), ],
+      pos = feature_matched_spectra$pos[order(feature_matched_spectra$pos$feature_mass), ]
+    )
+    
+    ## feature_mass column to rownames
+        ## Convert feature_mass to rownames
+    feature_matched_spectra <- list(
+      neg = feature_matched_spectra$neg %>%
+        remove_rownames() %>%
+        column_to_rownames(var = "feature_mass") %>%
+        as.data.frame(),
+      pos = feature_matched_spectra$pos %>%
+        remove_rownames() %>%
+        column_to_rownames(var = "feature_mass") %>%
+        as.data.frame()
+    )
+
+    ## Replace NA with 0
+    feature_matched_spectra <- list(
+      neg = replace(feature_matched_spectra$neg, is.na(feature_matched_spectra$neg), 0),
+      pos = replace(feature_matched_spectra$pos, is.na(feature_matched_spectra$pos), 0)
+    )
+
+    ## Transpose so rows are samples and columns are masses
+    aligned_spectra <- list(
+      neg = t(feature_matched_spectra$neg),
+      pos = t(feature_matched_spectra$pos)
+    )
+
+    ## Extract mz values
+    filtered_mz <- list(
+      neg = as.numeric(colnames(aligned_spectra$neg)),
+      pos = as.numeric(colnames(aligned_spectra$pos))
+    )
+  }
+}
+```
+
+```{r combine positive and negative}
+## Extract sample names
+sample_names_neg <- unlist(lapply(spectra_list$neg, names))
+sample_names_pos <- unlist(lapply(spectra_list$pos, names))
+
+## Assign row names properly
+rownames(aligned_spectra$neg) <- sample_names_neg
+rownames(aligned_spectra$pos) <- sample_names_pos
+
+## Extract common sample identifiers
+sample_names_neg_clean <- gsub("_Negative", "", sample_names_neg)
+sample_names_pos_clean <- gsub("_positive", "", sample_names_pos)
+
+## Identify matching samples
+common_samples <- intersect(sample_names_neg_clean, sample_names_pos_clean)
+
+## Extract class labels from file_name_list
+sample_class_neg <- unlist(mapply(rep, names(file_name_list$neg), lengths(file_name_list$neg)))
+sample_class <- setNames(sample_class_neg, common_samples)
+
+## Reorder both data matrices to match sample names
+aligned_spectra$neg <- aligned_spectra$neg[match(common_samples, sample_names_neg_clean), , drop = FALSE]
+aligned_spectra$pos <- aligned_spectra$pos[match(common_samples, sample_names_pos_clean), , drop = FALSE]
+
+## Prefix m/z columns for unique identification
+colnames(aligned_spectra$neg) <- paste0("neg_", colnames(aligned_spectra$neg))
+colnames(aligned_spectra$pos) <- paste0("pos_", colnames(aligned_spectra$pos))
+
+## Combine both modes by row binding
+combined_spectra <- cbind(aligned_spectra$neg, aligned_spectra$pos)
+
+## Restore proper sample naming
+rownames(combined_spectra) <- common_samples
+```
+
+```{r normalization}
+xall <- normalize_pixel(combined_spectra, normalization_method)
+```
+
+```{r yall}
+## Ensure yall follows the row order of xall
+yall <- unname(sample_class[rownames(xall)])
+
+## Convert to factor
+classes <- unique(c(classes$neg, classes$pos))
+yall <- factor(yall, levels = classes)
+```
+
+```{r Split Data into Training and Testing Sets}
+## splitting based on response variables
+set.seed(seed)
+train_partition <- createDataPartition(
+  yall,
+  p = train_fraction,
+  times = 2,
+  list = TRUE )
+
+train_index <- train_partition$Resample2
+
+## create training set
+xtrain <- xall[train_index, ]
+ytrain <- yall[train_index]
+
+## create testing set
+xtest <- xall[-train_index, ]
+ytest <- yall[-train_index]
+
+sample_names_df$train_test_set <- ifelse(row_number(sample_names_df) %in% train_index, "train", "test")
+```
+
+```{r Training}
+model <- glmnet(
+  xtrain, 
+  ytrain, 
+  family = "binomial", ## for logit (logarithm of the odds) or logistic regression
+  alpha = 1, ## for lasso
+  standardize = FALSE, ## because intensities are already in same units
+  lambda.min.ratio = 1e-05 ) ## The model will compute its own lambda sequence based on nlambda and lambda.min.ratio 
+```
+
+```{r Cross Validation}
+## set number of folds
+nfolds <- 10
+#nfolds <- nrow(xtrain) ## leave-one-sample-out cross validation
+
+set.seed(seed)
+## cross validation
+cvmodel <- cv.glmnet(
+  xtrain, 
+  ytrain, 
+  nfolds = nfolds,
+  type.measure = "class", ## loss to use for binomial cross-validation, gives misclassification error
+  keep = TRUE, ## returns a prevalidated array containing fitted values 
+  ## for each observation and each value of lambda
+  family = "binomial", ## for logit (logarithm of the odds) or logistic regression
+  alpha = 1, ## for lasso
+  standardize = FALSE, ## because intensities are already in same units
+  lambda.min.ratio = 1e-05 )
+```
+
+```{r ROC Metrics}
+## save index of lambda value that gives minimum cvm (mean cross-validated error)
+min_lambda_index <- which(cvmodel$lambda == cvmodel$lambda.min)
+
+## 1/(1+e^(-preval)) is the inverse of the link function?
+cv_predictions <- 1/(1+exp(-cvmodel$fit.preval[,min_lambda_index]))
+
+## build ROC for training data using minLamIdx
+roc_curve <- roc(
+  ytrain, 
+  cv_predictions )
+
+## create dataframe from ROC object to create plot for trade off
+## of accuracy, sensitivity, and specificity
+roc_df <- data.frame(
+  cutoff = roc_curve$thresholds, 
+  sensitivity = roc_curve$sensitivities, 
+  specificity = roc_curve$specificities )
+
+roc_df$accuracy <- (roc_df$sensitivity*length(roc_curve$cases) + 
+                      roc_df$specificity*length(roc_curve$controls)) / (length(roc_curve$cases) + 
+                                                                          length(roc_curve$controls) )
+
+## plot trade off of accuracy, sensitivity, and specificity
+roc_metrics <- ggplot(roc_df) + geom_line(aes(cutoff, sensitivity, col = "Sensitivity")) + 
+  geom_line(aes(cutoff, specificity, col = "Specificity")) + 
+  geom_line(aes(cutoff, accuracy, col = "Accuracy")) +
+  labs(x = "cutoff", y = "%", color="") +
+  ggtitle("Trade off of performance metrics for determining threshold cutoff value")
+```
+
+```{r Threshold Coordinates}
+## Identify Threshold Coordinates where Accuracy, Sensitivity, and Specificity Cross
+## Set threshold for labeling classes --> balance of true positive and false positive rates.
+best_threshold <- as.double(coords(roc_curve, 
+                                   "best", ## coordinates for best threshold value
+                                   ret = "threshold", ## coordinates to return
+                                   best.method = "youden" )[1,1]) ## optimal cut-off is the threshold that maximizes the distance to the identity (diagonal) line
+```
+
+```{r CV Confusion Matrix}
+## predict classes based on threshold
+cv_p_thresh <- ifelse(cv_predictions < best_threshold, classes[1], classes[2])
+
+cv_p_class <- factor(cv_p_thresh, levels(ytrain))
+
+## simple confusion matrix table
+cv_cm <- table(True=ytrain,
+               Predict=cv_p_class)
+```
+
+```{r Training Histogram}
+train_df <- data.frame(file_name=common_samples[train_index], 
+                       true_class=ytrain, 
+                       prediction_class=cv_p_class, 
+                       probability=cv_predictions)
+
+rownames(train_df) <- NULL
+
+train_wrong_preds <- train_df %>%
+  filter(true_class != prediction_class)
+```
+
+```{r Report Model Coefficients}
+filtered_mz_vector <- c(filtered_mz$neg, filtered_mz$pos)
+lasso_coef <- reportCoef(xall, model, cvmodel$lambda.min, filtered_mz_vector, classes)
+```
+
+```{r Testing}
+test_p <- predict(model,
+                  xtest,
+                  s = cvmodel$lambda.min, ## Value of the penalty parameter lambda 
+                  ## at which predictions are required
+                  type = "response" ) ## to get prediction values rather than linker function values
+```
+
+```{r Testing Confusion Matrix}
+test_p_thresh <- ifelse(test_p < best_threshold, classes[1], classes[2]) 
+test_p_class <- factor(test_p_thresh, levels(ytest))
+
+## simple confusion matrix table
+test_cm <- table(True=ytest,
+                 Predict=test_p_class)
+```
+
+```{r Test Histogram}
+test_df <- data.frame(file_name=common_samples[-c(train_index)], 
+                      true_class=ytest, 
+                      prediction_class=test_p_class, 
+                      probability=as.numeric(test_p))
+
+rownames(test_df) <- NULL
+
+test_wrong_preds <- test_df %>%
+  filter(true_class != prediction_class)
+```
+
+```{r save model, include=FALSE}
+message("out_dir: ", out_dir)
+message("files_dir: ", files_dir)
+message("proj_name: ", proj_name)
+save(model, cvmodel, filtered_mz, best_threshold,
+     file=file.path(out_dir, files_dir, paste0(proj_name, "_model.RData")))
+```
+
+```{r}
+save(list = ls(), file=file.path(out_dir, files_dir, paste0(proj_name, "_ALL.RData")))
+```
+
+```{r save files, include = FALSE}
+## training set files
+
+write.csv(cv_cm, 
+          file = file.path(out_dir, files_dir, "train_cm.csv"))
+
+write.csv(train_df, 
+          row.names = FALSE,
+          file.path(out_dir, files_dir, "train_preds.csv"))
+
+write.csv(train_wrong_preds, 
+          row.names = FALSE,
+          file.path(out_dir, files_dir, "misclassified_train_preds.csv"))
+
+write.csv(lasso_coef, 
+          file.path(out_dir, files_dir, "lasso_coefficients.csv"))
+
+## test set files
+
+write.csv(test_cm, 
+          file = file.path(out_dir, files_dir, "test_cm.csv"))
+
+write.csv(test_df, 
+          row.names = FALSE,
+          file.path(out_dir, files_dir, "test_preds.csv"))
+
+write.csv(test_wrong_preds, 
+          row.names = FALSE,
+          file.path(out_dir, files_dir, "misclassified_test_preds.csv"))
+```
+
+```{r save plots, include=FALSE}
+png(filename=file.path(out_dir, files_dir, "cv_plot.png"))
+plot(cvmodel)
+title("cross-validation curve : binomial family", line = 2.5)
+dev.off()
+
+png(filename=file.path(out_dir, files_dir, "roc_plot.png"))
+plot(roc_curve, 
+     print.thres="best", 
+     print.thres.best.method="youden",
+     print.auc=TRUE, 
+     auc.polygon=TRUE,
+     main = "ROC Curve")
+dev.off()
+
+ggsave(roc_metrics, filename = file.path(out_dir, files_dir, "roc_metrics_thresh.png"))
+```
+
+<br>
+
+#### **Preprocessing and Statistical Model Settings**
+
+```{r chunk3, fig.align = "center"}
+if (peak_alignment_method == "clustering") {
+  cluster_bin_size <- c("Cluster Height:", clust_h)
+} else if (peak_alignment_method == "binning") {
+  cluster_bin_size <- c("Bin Size:", "0.01")
+} else if (peak_alignment_method == "featurelist") {
+  cluster_bin_size <- c("Feature Mass Error (ppm):", ppm_error)
+}
+
+if (is.null(background_file$neg)) {
+  bg_exclusion <- "no"
+} else if (!is.null(background_file)) {
+  bg_exclusion <- "yes"
+}
+
+settings_df <- rbind(c("Mass Range (m/z):", paste0(mass_range[1], " - ", mass_range[2])),
+                     c("Peak Alignment Method:", peak_alignment_method),
+                     cluster_bin_size,
+                     c("Background Peak Exclusion:", bg_exclusion),
+                     c("Normalization Method:", normalization_method),
+                     c("Train/Test Split:", paste0((train_fraction*100),"/",(100-(train_fraction*100)))),
+                     c("Randomization Seed:", seed))
+
+classes2 <- tools::toTitleCase(gsub("_", " ", classes))
+
+kable(settings_df,
+      #caption = "Preprocessing and LASSO Settings",
+      row.names = FALSE,
+      align = "l")%>%
+  column_spec(1:2, width = "3in")%>% 
+  kable_styling(full_width = FALSE, 
+                font_size = 14)
+
+cols <- rev(c(hue_pal()(2)))
+```
+
+```{r chunk4}
+cv_cm <- as.data.frame.matrix(cv_cm)
+test_cm <- as.data.frame.matrix(test_cm)
+
+cv_cm <- cbind(c("True", "True"),
+               classes2,
+               cv_cm)
+
+test_cm <- cbind(c("True", "True"),
+                 classes2,
+                 test_cm)
+
+rownames(cv_cm) <- NULL
+rownames(test_cm) <- NULL
+
+colnames(cv_cm) <- c(".", "  ", classes2)
+colnames(test_cm) <- c(".", "  ", classes2)
+
+names(cv_cm)[1] <- cell_spec(names(cv_cm)[1], color = "white")
+names(test_cm)[1] <- cell_spec(names(test_cm)[1], color = "white")
+
+cv_accuracy <- rbind(c(paste0(classes2[1], " Recall: "), 
+                       paste0(format(round((cv_cm[1,3]/rowSums(cv_cm[,3:4])[1])*100, 1), nsmall = 1), "%")),
+                     c(paste0(classes2[2], " Recall: "), 
+                       paste0(format(round((cv_cm[2,4]/rowSums(cv_cm[,3:4])[2])*100,1), nsmall = 1), "%")),
+                     c("Overall Accuracy: ", 
+                       paste0(format(round(((cv_cm[1,3] + cv_cm[2,4])/sum(cv_cm[, 3:4]))*100, 1), nsmall = 1), "%")))
+
+test_accuracy <- rbind(c(paste0(classes2[1], " Recall: "), 
+                         paste0(format(round((test_cm[1,3]/rowSums(test_cm[,3:4])[1])*100, 1), nsmall = 1), "%")),
+                       c(paste0(classes2[2], " Recall: "), 
+                         paste0(format(round((test_cm[2,4]/rowSums(test_cm[,3:4])[2])*100,1), nsmall = 1), "%")),
+                       c("Overall Accuracy: ", 
+                         paste0(format(round(((test_cm[1,3] + test_cm[2,4])/sum(test_cm[, 3:4]))*100, 1), nsmall = 1), "%")))
+```
+
+<br>
+
+#### **Training Set Confusion Matrix**
+
+```{r chunk6, fig.align = "center"}
+kable(cv_cm,
+      #caption = "Training Set",
+      align = "c",
+      format = "html",
+      escape = FALSE) %>%
+  kable_styling(full_width = FALSE) %>%
+  add_header_above(c("", " ", "Predict" = 2)) %>%
+  column_spec(1, bold = TRUE) %>%
+  column_spec(2, bold = TRUE) %>%
+  collapse_rows(columns = 1) %>% 
+  column_spec(3, background = "#c3fcb5")
+
+kable(cv_accuracy,
+      row.names = FALSE,
+      align = "r") %>% 
+  column_spec(1, bold = TRUE) %>%
+  kable_minimal(full_width = FALSE,
+                bootstrap_options = "condensed",
+                html_font = "Calibri",
+                font_size = 16)
+```
+
+<br>
+
+#### **Test Set Confusion Matrix**
+
+```{r chunk7, fig.align = "center"}
+kable(test_cm,
+      #caption = "Test Set", 
+      align = "c",
+      format = "html",
+      escape = FALSE) %>%
+  kable_styling(full_width = FALSE) %>%
+  add_header_above(c("", " ", "Predict" = 2)) %>%
+  column_spec(1, bold = TRUE) %>%
+  column_spec(2, bold = TRUE) %>%
+  collapse_rows(columns = 1) %>%
+  column_spec(3, background = "#c3fcb5")
+
+kable(test_accuracy,
+      row.names = FALSE,
+      align = "r") %>% 
+  column_spec(1, bold = TRUE) %>%
+  kable_minimal(full_width = FALSE,
+                bootstrap_options = "condensed",
+                html_font = "Calibri",
+                font_size = 16)
+```
+
+<br>
+
+```{r roc curve report, fig.align='center', fig.width=4, fig.height=4}
+plot(roc_curve, 
+     print.thres="best", 
+     print.thres.best.method="youden",
+     print.auc=TRUE, 
+     auc.polygon=TRUE,
+     main = "ROC")
+```
+
+<br>
+
+#### **LASSO Model Predictive Feature Weights**
+
+```{r chunk5}
+if(normalization_method == "median"){
+  lasso_coef2 <- data.frame(cbind(c("Intercept",
+                                    format(as.numeric(rownames(lasso_coef[2:nrow(lasso_coef),])), nsmall = 3)),
+                                  as.numeric(lasso_coef[, 1])))
+}else {
+  lasso_coef2 <- data.frame(cbind(c("Intercept", 
+                                    format(as.numeric(rownames(lasso_coef[2:nrow(lasso_coef),])), nsmall = 3)), 
+                                  format(round(as.numeric(lasso_coef[, 1]),3), nsmall = 3)))
+}
+
+colnames(lasso_coef2) <- c("Features", paste0("Weights (", classes2[2], ")"))
+```
+
+```{r}
+## remove intercept row
+intercept <- lasso_coef2[1, 2]
+
+## split features into positive and negative
+pos_features <- lasso_coef2[which(as.numeric(lasso_coef2[[2]]) > 0), ]
+neg_features <- lasso_coef2[which(as.numeric(lasso_coef2[[2]]) < 0), ]
+
+pos_features <- subset(pos_features, Features != "Intercept")
+neg_features <- subset(neg_features, Features != "Intercept")
+
+max_len <- max(nrow(pos_features), nrow(neg_features))
+
+pos_features <- pos_features[c(NA, seq_len(nrow(pos_features)), rep(NA, max_len - nrow(pos_features))), ]
+neg_features <- neg_features[c(NA, seq_len(nrow(neg_features)), rep(NA, max_len - nrow(neg_features))), ]
+empty_col <- c(intercept, rep(NA, max_len))
+
+split_lasso_coefs <- cbind(pos_features, empty_col, neg_features)
+
+split_lasso_coefs[is.na(split_lasso_coefs)] <- ""
+
+colnames(split_lasso_coefs) <- c(paste0(classes2[2], " Features"), 
+                                 paste0(classes2[2], " Weights"), 
+                                 "Intercept", 
+                                 paste0(classes2[1], " Features"), 
+                                 paste0(classes2[1], " Weights"))
+```
+
+```{r, fig.align = "center", eval = FALSE, include = FALSE}
+lasso_coef2 %>%
+  kable(
+    #caption = "LASSO Model Predictive Feature Weights",
+    row.names = FALSE,
+    align = "c") %>% 
+  kable_styling(full_width = FALSE, 
+                font_size = 14) %>%
+  column_spec(1:2,width = "2in")
+```
+
+```{r, fig.align = "center"}
+split_lasso_coefs %>%
+  kable(
+    #caption = "LASSO Model Predictive Feature Weights",
+    row.names = FALSE,
+    align = "c") %>% 
+  kable_styling(full_width = FALSE, 
+                font_size = 14) %>%
+  column_spec(1:5,width = "2in")
+```
+
+```{r chunk8, fig.width=12, fig.height=4, fig.align = "center"}
+## head to tail bar plot of LASSO features and weights
+if (normalization_method == "median"){
+  max_y <- max(abs(as.numeric(lasso_coef2[2:nrow(lasso_coef2), 2])))
+  min_y <- -1*max(abs(as.numeric(lasso_coef2[2:nrow(lasso_coef2), 2])))
+} else {
+  max_y <- round(max(abs(as.numeric(lasso_coef2[2:nrow(lasso_coef2), 2]))))
+  min_y <- -1*round(max(abs(as.numeric(lasso_coef2[2:nrow(lasso_coef2), 2]))))
+}
+
+lasso_coef3 <- lasso_coef2 %>% 
+  mutate(fill = ifelse(as.numeric(lasso_coef2[, 2]) < 0, classes2[1], classes2[2]))
+
+lasso_coef3$fill <- factor(lasso_coef3$fill, levels = rev(classes2))
+
+lasso_coef3 <- lasso_coef3[-c(1), ]
+
+lasso_coef_plot <- ggplot(lasso_coef3,
+                          aes(x = as.numeric(Features), y = as.numeric(lasso_coef3[, 2]), fill = fill)) +
+  geom_bar(stat = "identity", width = 2)+
+  labs(y = "Weights", x = expression(italic("m/z"))) +
+  coord_cartesian(xlim = c(100, 1000), ylim = c(min_y, max_y)) +
+  scale_x_continuous(breaks = seq(100, 1000, by = 50), expand = c(0.01,0)) +
+  #scale_y_continuous(breaks = seq(min_y, max_y, by = 50), expand = c(0.01,0)) +
+  scale_fill_manual(values = cols) + 
+  ggtitle("Feature Weights") +
+  theme_classic() + 
+  guides(fill = guide_legend(byrow = TRUE)) +
+  theme(legend.title=element_blank(),
+        legend.background = element_rect(fill='transparent')) +
+  geom_hline(yintercept=0)
+
+lasso_coef_plot
+```
+
+```{r chunk9, fig.width=8, fig.height=3, fig.align = "center"}
+train_plot <- ggplot(train_df, aes(x=probability, fill=true_class, color=true_class)) + 
+  geom_histogram(binwidth=0.01, alpha=0.25, position="identity",boundary=0) + 
+  ggtitle("LASSO Prediction Probabilities: Training Set") +
+  geom_vline(xintercept = best_threshold, linewidth = 0.75,  color = "black", linetype = "dashed") +
+  scale_x_continuous(breaks = seq(0, 1, by = 0.1), minor_breaks = seq(0, 1, by = 0.05), expand = c(0.05,0)) +
+  #scale_y_continuous(breaks = seq(0, nrow(train_df), by = 5), minor_breaks = seq(0, nrow(train_df), by = 1), expand = c(0.01,0)) +
+  scale_color_manual(values = rev(cols), labels = c(classes2[1], classes2[2])) +
+  scale_fill_manual(values = rev(cols), labels = c(classes2[1], classes2[2])) +
+  labs(x = "Prediction Probability", y = "Spectra Count", color="True Class", fill = "True Class") +
+  #theme_minimal(base_size = 9)
+  theme_minimal() +
+  theme(legend.position = "bottom")
+
+test_plot <- ggplot(test_df, aes(x=probability, fill=true_class, color=true_class)) + 
+  geom_histogram(binwidth=0.01, alpha=0.25, position="identity",boundary=0) + 
+  ggtitle("LASSO Prediction Probabilities: Test Set") +
+  geom_vline(xintercept = best_threshold, linewidth = 0.75,  color = "black", linetype = "dashed") +
+  scale_x_continuous(breaks = seq(0, 1, by = 0.1), minor_breaks = seq(0, 1, by = 0.05), expand = c(0.05,0)) +
+  #scale_y_continuous(breaks = seq(0, nrow(test_df), by = 5), minor_breaks = seq(0, nrow(test_df), by = 1), expand = c(0.01,0)) +
+  scale_color_manual(values = rev(cols), labels = c(classes2[1], classes2[2])) +
+  scale_fill_manual(values = rev(cols), labels = c(classes2[1], classes2[2])) +
+  labs(x = "Prediction Probability", y = "Spectra Count", color="True Class", fill = "True Class") +
+  #theme_minimal(base_size = 9)
+  theme_minimal() +
+  theme(legend.position = "bottom")
+
+#ggarrange(train_plot, test_plot, common.legend = TRUE,legend = "bottom")
+```
+
+```{r}
+ggsave(plot=lasso_coef_plot, filename = file.path(out_dir, files_dir, "lasso_coef_plot.png"), 
+       width = 12,
+       height = 3,
+       units = "in",
+       dpi = 300)
+ggsave(plot=train_plot, filename = file.path(out_dir, files_dir, "train_histogram.png"), bg = "white")
+ggsave(plot=test_plot, filename = file.path(out_dir, files_dir, "test_histogram.png"), bg = "white")
+```
+
+```{r chunk10}
+## Add misclassified training samples
+train_wrong_preds <- train_df %>%
+  filter(true_class != prediction_class)
+
+train_wrong_preds <- train_wrong_preds[order(train_wrong_preds$true_class), ]
+
+train_wrong_preds$true_class <- gsub(classes[1], classes2[1], gsub(classes[2], classes2[2],train_wrong_preds$true_class))
+train_wrong_preds$prediction_class <- gsub(classes[1], classes2[1], gsub(classes[2], classes2[2],train_wrong_preds$prediction_class))
+
+train_wrong_preds$probability <- round(train_wrong_preds$probability, 3)
+
+## Add misclassified test samples
+test_wrong_preds <- test_df %>%
+  filter(true_class != prediction_class)
+
+test_wrong_preds <- test_wrong_preds[order(test_wrong_preds$true_class), ]
+
+test_wrong_preds$true_class <- gsub(classes[1], classes2[1], gsub(classes[2], classes2[2],test_wrong_preds$true_class))
+test_wrong_preds$prediction_class <- gsub(classes[1], classes2[1], gsub(classes[2], classes2[2],test_wrong_preds$prediction_class))
+
+test_wrong_preds$probability <- round(test_wrong_preds$probability, 3)
+```
+
+<br>
+
+#### **Training Set Misclassifications**
+
+```{r chunk11, fig.align = "center"}
+train_plot
+
+kable(train_wrong_preds,
+      #caption = "Training Set Misclassifications",
+      col.names = c("Sample Name", "True Class", "Predicted Class", "Probability"),
+      row.names = FALSE,
+      align = "l")  %>%
+  kable_styling(position = "center", 
+                bootstrap_options = c("striped", "condensed"),
+                full_width = FALSE, 
+                font_size = 14)
+```
+
+<br>
+
+#### **Test Set Misclassifications**
+
+```{r chunk12, fig.align = "center"}
+test_plot
+
+kable(test_wrong_preds,
+      #caption = "Test Set Misclassifications",
+      col.names = c("Sample Name", "True Class", "Predicted Class", "Probability"),
+      row.names = FALSE,
+      align = "l")  %>%
+  kable_styling(position = "center", 
+                bootstrap_options = c("striped", "condensed"),
+                full_width = FALSE, 
+                font_size = 14)
+```
+
+<br>
+
+#### **Train/Test Data Split**
+
+```{r chunk13}
+## Add list of samples for training and testing
+train_samples <- sort(train_df$file_name)
+test_samples <- sort(test_df$file_name)
+
+n <- max(length(train_samples), length(test_samples))
+length(train_samples) <- n                      
+length(test_samples) <- n
+
+samples <- cbind("Training Samples" = train_samples,
+                 "Test Samples" = test_samples)
+
+samples[is.na(samples)] <- ""
+```
+
+```{r chunk14}
+kable(samples,
+      #caption = "Train/Test Data Split",
+      row.names = FALSE,
+      align = "l") %>%
+  kable_minimal(full_width = FALSE,
+                bootstrap_options = "condensed",
+                html_font = "Calibri",
+                font_size = 12)
+```

@@ -1,0 +1,264 @@
+---
+title: "Infected/Non-Infected Classification"
+author: "Jacob Mardick"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## **Libraries**
+
+```{r Libraries, message=FALSE, warning=FALSE, echo=FALSE}
+library(readxl)
+library(sqldf)
+library(dplyr)
+library(tidyr)
+```
+
+## **User Input**
+
+```{r User Input}
+mz_of_interest <- c(721.5025, 722.5059, 722.513, 723.5164, 733.5025, 734.5059, 734.5342, 735.5375, 747.5182, 748.5216, 748.528, 749.532, 764.5236, 765.5269)
+infected_dir <- c("C:/Users/Jacob/Box/Eberlin_Lab_BCM/People/MANOJ/INFECTED SAMPLE EXCEL SHEET/INFCTED SAMPLE 2023", "C:/Users/Jacob/Box/Eberlin_Lab_BCM/People/MANOJ/INFECTED SAMPLE EXCEL SHEET/INFECTED SAMPLE 2024")
+uninfected_dir <- "C:/Users/Jacob/Box/Eberlin_Lab_BCM/People/MANOJ/Pedsarcoma Project/Excel sheet"
+normalization_method <- "tic" ## tic, median, medianlog, maxpeak, or none
+```
+
+```{r include = FALSE}
+## create directory for output files
+#out_dir <- paste0(format(Sys.time(), "%Y-%m-%d_%H.%M"),"_species_outputs")
+#if(!file.exists(file.path(out_dir))) {
+  #dir.create(file.path(out_dir)) 
+  #}
+```
+
+## **Peak match**
+
+``` {r Peak List, message=FALSE, warning=FALSE}
+# Create the m/z interest interval data frame
+mz_interest_interval <- data.frame(
+  target_mz = mz_of_interest,
+  minus_005 = mz_of_interest - 0.005,
+  plus_005 = mz_of_interest + 0.005
+)
+```
+
+## **Read in infected and uninfected samples and combine to same data frame**
+
+```{r Samples}
+## Define function to process uninfected directory without classes
+process_directory <- function(directory, infected_status) {
+  file_list <- list.files(path = directory, pattern = "*.xlsx", full.names = TRUE)
+
+  ## Exclude specific files
+  file_list <- file_list[!grepl("Blank|List for Mass matchning", file_list)]
+  file_list <- file_list[!grepl("~\\$", basename(file_list))]
+  file_name_list <- tools::file_path_sans_ext(basename(file_list))
+
+  data_list <- lapply(seq_along(file_list), function(i) {
+    df <- read_excel(file_list[i], col_names = TRUE, skip = 7)
+    df$Infected <- infected_status
+    return(df)
+  })
+
+  ## Set names of the samples
+  named_data_list <- setNames(data_list, file_name_list)
+
+  return(named_data_list)
+}
+
+## Process infected and uninfected directories
+infected_data_list <- process_directory(infected_dir, infected_status = 1)
+uninfected_data_list <- process_directory(uninfected_dir, infected_status = 0)
+
+## Combine into one list
+data_list <- c(infected_data_list, uninfected_data_list)
+data_list <- lapply(data_list, as.data.frame)
+
+## Check if required columns exist in each data frame
+required_columns <- c("Mass", "Intensity", "Infected")
+
+## Search for which samples were not properly read
+for (i in seq_along(data_list)) {
+  sample <- data_list[[i]]
+  if (!all(required_columns %in% names(sample))) {
+    stop(paste("Data frame", names(data_list)[i], "is missing required columns"))
+  }
+}
+```
+
+## **Match sample peaks to target peak intervals**
+
+```{r Peak Matching}
+## Initiate empty list
+peak_matched_list <- list()
+
+## Peak match from mz_interest_interval
+for (i in seq_along(data_list)) {
+  sample <- data_list[[i]]
+  ## Pass mz_interest_interval explicitly to sqldf
+  matched_mz <- sqldf('SELECT mz_interest_interval.target_mz, sample.Intensity, sample.Infected
+                      FROM sample, mz_interest_interval
+                      WHERE sample.Mass between mz_interest_interval.minus_005 AND mz_interest_interval.plus_005',
+                      list(sample = sample, mz_interest_interval = mz_interest_interval))
+  peak_matched_list[[i]] <- matched_mz
+}
+
+## Add file names to peak matched list
+names(peak_matched_list) <- names(data_list)
+```
+
+## **Combine all samples into one data frame and sum intensities of duplicate peaks**
+
+```{r Combine}
+## Combine list of sample dfs into one large df
+all_samples_df <- bind_rows(peak_matched_list, .id = "Sample")
+
+## Check for duplicates
+duplicate_check <- all_samples_df %>%
+  group_by(Sample, target_mz) %>%
+  filter(n() > 1)
+print(duplicate_check)
+
+## If there are duplicates, aggregate them
+if (nrow(duplicate_check) > 0) {
+  all_samples_df <- all_samples_df %>%
+    group_by(Sample, target_mz) %>%
+    summarize(Intensity = sum(Intensity), .groups = 'drop')
+}
+
+## Add infection status back to all_samples_df
+infection_status <- data_list %>%
+  bind_rows(.id = "Sample") %>%
+  select(Sample, Infected) %>%
+  distinct()
+
+all_samples_df <- all_samples_df %>%
+  left_join(infection_status, by = "Sample")
+
+## Check for duplicates (again)
+duplicate_check2 <- all_samples_df %>%
+  group_by(Sample, target_mz) %>%
+  filter(n() > 1)
+print(duplicate_check2)
+
+## Reshape all_samples_df to m/z values as columns
+wide_all_samples_df <- all_samples_df %>%
+  pivot_wider(names_from = target_mz, values_from = Intensity)
+
+## Vector for infection status
+yall <- wide_all_samples_df$Infected
+
+## Remove infection column from wide_all_samples_df
+wide_all_samples_df <- wide_all_samples_df[, -2]
+```
+
+## **Function to calculate prediction of infected/uninfected**
+
+```{r infection prediction function}
+predict_infection <- function(data, mz_pair, threshold) {
+  ## Denote each m/z intensity
+  mz1 <- as.character(mz_pair[1])
+  mz2 <- as.character(mz_pair[2])
+  
+  ## Check if both m/z values exist in the data
+  if (!(mz1 %in% names(data) & mz2 %in% names(data))) {
+    return(rep(NA, nrow(data)))
+  }
+  
+  ## Calculate the ratio
+  ratio <- data[[mz2]]/data[[mz1]]
+  
+  ## Apply threshold for prediction
+  prediction <- ifelse(ratio > threshold, 1, 0)
+  return(prediction)
+}
+```
+
+## **Define m/z pairs and ratio thresholds**
+
+```{r mz pairs}
+## m/z pairs for ratio test
+mz_pairs <- list(
+  c(721.5025, 722.5059),
+  c(722.513, 723.5164),
+  c(733.5025, 734.5059),
+  c(734.5342, 735.5375),
+  c(747.5182, 748.5216),
+  c(748.528, 749.532),
+  c(764.5236, 765.5269)
+)
+
+thresholds <- c(0.473, 0.508, 0.484, 0.487, 0.495, 0.530, 0.530)
+```
+
+## Predict infected/uninfected in dataset
+
+```{r predict}
+## Initialize data frame to store predictions
+predictions_df <- data.frame(matrix(nrow = nrow(wide_all_samples_df), ncol = 0))
+
+## Loop through each sample and the 7 m/z pairs
+for (i in seq_along(mz_pairs)) {
+  mz_pair <- mz_pairs[[i]]
+  threshold <- thresholds[i]
+  col_name <- paste0("Prediction_", mz_pair[1], "_", mz_pair[2])
+  predictions_df[[col_name]] <- predict_infection(wide_all_samples_df, mz_pair, threshold)
+}
+
+## Use max function across row to make final prediction
+predictions_df$Final_Prediction <- do.call(pmax, c(predictions_df, list(na.rm = TRUE)))
+
+## Add predictions to original data frame
+final_predictions_df <- wide_all_samples_df %>%
+  bind_cols(predictions_df %>%
+              select(Final_Prediction))
+
+## Add actual infection status to data frame
+final_predictions_df <- final_predictions_df %>%
+  left_join(infection_status %>%
+              select(Sample, Infected), by = "Sample")
+
+print(final_predictions_df)
+#write.csv(final_predictions_df, "InfectedvsNoninfected_Manoj_predictions.csv")
+#write.csv(predictions_df, "InfectedvsNoninfected_Manoj_predictionsratios.csv")
+
+## Remove rows where final prediction is NA
+final_predictions_df <- final_predictions_df %>%
+  filter(!is.na(Final_Prediction))
+```
+
+## Confusion Matrix
+
+```{r confusion matrix}
+## Create confusion matrix
+confusion_matrix <- table(Actual = factor(final_predictions_df$Infected, levels = c(0, 1), 
+                                          labels = c("Uninfected", "Infected")), 
+                          Predicted = factor(final_predictions_df$Final_Prediction, levels = c(0, 1), 
+                                             labels = c("Uninfected", "Infected")))
+print(confusion_matrix)
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
