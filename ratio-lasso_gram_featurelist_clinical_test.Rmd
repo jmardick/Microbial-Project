@@ -75,18 +75,25 @@ model_path <- gsub("\\\\", "/", r"(C:\Users\Jacob\Box\Eberlin_Lab_BCM\Projects\B
 sample_dir <- gsub("\\\\", "/", r"(C:\Users\Jacob\Box\Eberlin_Lab_BCM\Projects\Bacterial Identification\data\clinical_patient_samples\MSPen\negative_ion_mode\solvent_MeOH)")
 
 high_inf_file <- gsub("\\\\", "/", r"(C:\Users\Jacob\Box\Eberlin_Lab_BCM\Projects\Bacterial Identification\Faith_scripts\highly_infected_clinical_patient_samples_ids.xlsx)")
+
+## Full path to feature list, otherwise NULL
+feature_file <- gsub("\\\\", "/", r"(C:\Users\Jacob\Box\Eberlin_Lab_BCM\Projects\Bacterial Identification\feature_peak_lists\20250130_combined_tsm_manoj_gram_features.xlsx)")
 ```
 
 ```{r create directory for output files, include = FALSE}
 proj_name <- tools::file_path_sans_ext(basename(rstudioapi::getSourceEditorContext()$path))
 
-out_dir <- paste0(proj_name, "_", Sys.Date())
+out_dir <- file.path("outputs", paste0(proj_name, "_", Sys.Date()))
 
-if(!file.exists(out_dir)) {   dir.create(out_dir) }
+if(!file.exists(out_dir)) {   
+  dir.create(out_dir, recursive = TRUE) 
+  }
 
-files_dir <- paste0(format(Sys.time(), "%Y-%m-%d_%H.%M"), "_", proj_name, "_files")
+files_dir <- file.path(out_dir, paste0(format(Sys.time(), "%Y-%m-%d_%H.%M"), "_", proj_name, "_files"))
 
-if(!file.exists(file.path(out_dir,files_dir))) {   dir.create(file.path(out_dir,files_dir)) }
+if(!file.exists(files_dir)) {   
+  dir.create(files_dir, recursive = TRUE) 
+  }
 ```
 
 ```{r classes sample_file_ext and fixed_objects}
@@ -374,6 +381,8 @@ if (peak_alignment_method == "clustering") {
   rownames(aligned_spectra) <- sample_names
   
 } else if (peak_alignment_method == "featurelist") {
+  
+  if (is.null(feature_file))
   ## use filtered_mz as feature list
   feature_peaks <- filtered_mz
   
