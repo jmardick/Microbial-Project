@@ -196,11 +196,7 @@ if (sample_file_ext == "csv") {
   ## Set sample names and classes of spectra_list
   spectra_list <- lapply(seq_along(spectra_list), \(i) setNames(spectra_list[[i]], sample_names_list[[i]]))
   names(spectra_list) <- classes
-}
-```
-
-```{r excel data}
-if (sample_file_ext == "xlsx") {
+} else if (sample_file_ext == "xlsx") {
   
   process_xlsx <- function(file_name_list, fixed_objects) {
     cl <- makeCluster(detectCores() - 1) # Use one less than the number of available cores
@@ -213,9 +209,9 @@ if (sample_file_ext == "xlsx") {
         spectrum <- tryCatch(read_excel(file_name_list[[i]][[j]], 
                                         col_names = c("mass", "intensity"), 
                                         skip = 8), 
-                             error = function(e) tryCatch(read_excel(file_name_list[[i]][[j]], 
-                                                                     col_names = c("mass", "intensity", "relative"), 
-                                                                     skip = 8),
+                            error = function(e) tryCatch(read_excel(file_name_list[[i]][[j]], 
+                                                                    col_names = c("mass", "intensity", "relative"), 
+                                                                    skip = 8),
                                                           error = function(e) return(read_excel(file_name_list[[i]][[j]], 
                                                                                                 col_names = c("mass", "intensity", "relative", "noise"), 
                                                                                                 skip = 8))))
@@ -232,18 +228,18 @@ if (sample_file_ext == "xlsx") {
           spectrum$SNR <- (spectrum$intensity)/(spectrum$noise)
           
           spectrum <- tryCatch(subset(spectrum, SNR >= SNR_thresh),
-                               error = function(e) return(spectrum))
+                              error = function(e) return(spectrum))
           
           ## Remove columns "relative", "noise", and "SNR"
           spectrum <- subset(spectrum, select = -c(relative, noise, SNR))
           
           return(spectrum)
-        }else if(length(spectrum) == 3){
+        } else if(length(spectrum) == 3){
           ## Remove column "relative"
           spectrum <- spectrum[, !colnames(spectrum) %in% c("relative")]
           
           return(spectrum)
-        }else if(length(spectrum) == 2){
+        } else if(length(spectrum) == 2){
           return(spectrum)
         }
       }
@@ -257,13 +253,7 @@ if (sample_file_ext == "xlsx") {
   ## Set sample names and classes of spectra_list
   spectra_list <- lapply(seq_along(spectra_list), \(i) setNames(spectra_list[[i]], sample_names_list[[i]]))
   names(spectra_list) <- classes
-}
-```
-
-```{r raw Thermo data}
-## If sample files are raw Thermo
-if (sample_file_ext == "raw") {
-  
+} else if (sample_file_ext == "raw") {
   process_raw_thermo <- function(file_name_list, fixed_objects) {
     cl <- makeCluster(detectCores() - 1) # Use one less than the number of available cores
     registerDoParallel(cl)
