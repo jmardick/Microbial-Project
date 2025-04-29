@@ -329,129 +329,161 @@ if (sample_file_ext == "csv") {
 
 ```{r peak alignment}
 if (peak_alignment_method == "clustering") {
-  ## match peaks to centroids based on min and max of clusters
-  ## fixed objects for exporting to parallel computing
-  fixed_objects <- list(mass_range = mass_range, centroid_peaks = feature_peaks)
-  
-  centroid_peak_alignment <- function(spectra_list, fixed_objects) {
-    cl <- makeCluster(detectCores() - 1) # Use one less than the number of available cores
-    registerDoParallel(cl)
+  ## If background peak list: add background peaks to clustering
+  if (!is.null(background_file)) {
+    bg_mz <- unlist(read.csv(background_file, header = FALSE))
     
-    result <- foreach(i = seq_along(spectra_list), .packages = c('dplyr', 'sqldf')) %:% 
-      foreach(j = seq_along(spectra_list[[i]])) %dopar% {
-        
-        spectrum <- spectra_list[[i]][[j]]
-        centroid_peaks <- fixed_objects$centroid_peaks
-        
-        feature_matched_spectrum <- sqldf("SELECT centroid_peaks.centroid, spectrum.*
-          FROM spectrum,centroid_peaks
-          WHERE spectrum.mass between centroid_peaks.min_mass AND centroid_peaks.max_mass")
-        
-        ## remove mass columns
-        feature_matched_spectrum <- subset(feature_matched_spectrum, select = -c(mass))
-        
-        ## sum intensities of duplicates
-        feature_matched_spectrum <- aggregate(intensity ~ ., data = feature_matched_spectrum, FUN = sum)
-      }
-    stopCluster(cl)
-    return(result)
+    sample_mz <- sort(unlist(
+      lapply(spectra_list, function(y)
+        lapply(y, function(x)
+          round(x$mass, 3)))))
+    
+    all_mz <- c(bg_mz, sample_mz)
+    names(all_mz) <- all_mz
+    
+  } else { ## If no background peak list
+    all_mz <- sort(unlist(
+      lapply(spectra_list, function(y)
+        lapply(y, function(x)
+          round(x$mass, 3)))))
+    
+    names(all_mz) <- all_mz
   }
   
-  feature_matched_spectra <- centroid_peak_alignment(spectra_list, fixed_objects)
-  feature_matched_spectra <- lapply(feature_matched_spectra, function(x) lapply(x, setNames, c("feature_mass", "intensity")))
+  ## Cluster peaks into centroids
+  tree <- fcluster(all_mz)
+  clust_mz <- fcutree(all_mz, tree, h=clust_h)
+  clustMZ <- sort(clust_mz$cen)
   
-} else if (peak_alignment_method == "binning") {
+  ## Match cluster centroids to sample peaks
+  clusterMatrixList <- lapply(spectra_list, function(x, y, z, w) 
+    get_cluster_matrix(x, y, z, w), y=clustMZ, z = clust_h, w = clust_int_method)
   
-  ## Bin sample peaks
-  preprocList <- lapply(spectra_list, function(x,z) get_data_matrix_binning(x,z), z=filtered_mz)
+  preprocList <- lapply(clusterMatrixList, function(x) as.matrix(get_data_matrix_clustering(x)))
+  
+  save(preprocList, 
+       file = file.path(out_dir, files_dir, 
+                        paste0(peak_alignment_method,
+                               "_h", clust_h, clust_int_method,
+                               "_preprocList.RData")))
   
   aligned_spectra <- do.call(rbind, preprocList)
   
-  colnames(aligned_spectra) <- filtered_mz
+  colnames(aligned_spectra) <- clustMZ
   rownames(aligned_spectra) <- sample_names
+  
+  ## FILTER #3: REMOVE RARE/UNCOMMON PEAKS PRESENT < 10% SAMPLES
+  mz_count_filter <- colSums(aligned_spectra != 0) > as.integer(nrow(aligned_spectra)*0.10)
+  aligned_spectra <- aligned_spectra[, mz_count_filter]
+  
+  ## FILTER #4: REMOVE BACKGROUND PEAKS (IF BACKGROUND FILE PRESENT)
+  if (!is.null(background_file)) {
+    
+    ## match bg_mz to cluster centroid
+    temp_a <- data.frame(cluster_id = clust_mz$cluster_index,
+                         all_mz = all_mz)
+    
+    temp_b <- data.frame(clust_centroid = clust_mz$centroid, 
+                         cluster_id = unique(clust_mz$cluster_index)[order(unique(clust_mz$cluster_index))])
+    
+    temp_c <- merge(temp_a, temp_b, by = "cluster_id")
+    
+    bg_centroids <- unique(temp_c[temp_c$all_mz %in% bg_mz, ])
+    
+    ## Remove peaks from aligned_spectra that are in bg_mz_centroid
+    aligned_spectra <- aligned_spectra[, !(colnames(aligned_spectra) %in% bg_centroids$clust_centroid)]
+  }
+  
+  filtered_mz <- as.numeric(colnames(aligned_spectra))
   
 } else if (peak_alignment_method == "featurelist") {
   
-  if (is.null(feature_file))
-  ## use filtered_mz as feature list
-  feature_peaks <- filtered_mz
-  
-  ## Feature mz plus/minus instrument mass error, round to 3 decimal places
-  mass_error <- unlist((ppm_error * feature_peaks)/1e6)
-  
-  feature_peaks <- data.frame(feature_mass = feature_peaks,
-                              mass_error = mass_error,
-                              mass_error_lower = round(feature_peaks - mass_error,3),
-                              mass_error_upper = round(feature_peaks + mass_error,3))
-  
-  ## fixed objects for exporting to parallel computing
-  fixed_objects <- list(mass_range = mass_range, feature_peaks = feature_peaks)
-  
-  feature_peak_alignment <- function(spectra_list, fixed_objects) {
-    cl <- makeCluster(detectCores() - 1) # Use one less than the number of available cores
-    registerDoParallel(cl)
+  if (is.null(feature_file)) {
     
-    result <- foreach(i = seq_along(spectra_list), .packages = c('dplyr', 'sqldf')) %:% 
-      foreach(j = seq_along(spectra_list[[i]])) %dopar% {
-        
-        spectrum <- spectra_list[[i]][[j]]
-        feature_peaks <- fixed_objects$feature_peaks
-        
-        feature_matched_spectrum <- sqldf("SELECT feature_peaks.feature_mass, spectrum.*
-          FROM spectrum,feature_peaks
-          WHERE spectrum.mass between feature_peaks.mass_error_lower AND feature_peaks.mass_error_upper")
-        
-        if (nrow(feature_matched_spectrum) > 0) {
-          feature_matched_spectrum <- subset(feature_matched_spectrum, select = -c(mass))
-          feature_matched_spectrum <- aggregate(intensity ~ ., data = feature_matched_spectrum, FUN = sum)
-        } else {
-          feature_matched_spectrum <- data.frame(feature_mass = feature_peaks$feature_mass,
-                                               intensity = 0)
-        }
-        
-        return(feature_matched_spectrum)
-        
-      }
-    stopCluster(cl)
-    return(result)
-  }
+    print("No path specified for feature list. Add path to file or choose a different peak alignment method.")
+    
+  }else{
+    
+    ## Read file with feature peaks
+    feature_df <- read_excel(feature_file, col_names = TRUE)
+    ## TODO: What if CSV file?
+    
+    feature_peaks <- unlist(feature_df[,1])
+    
+    ## Feature mz plus/minus instrument mass error, round to 3 decimal places
+    mass_error <- unlist((ppm_error * feature_peaks)/1e6)
+    
+    feature_peaks <- data.frame(feature_mass = feature_peaks,
+                                mass_error = mass_error,
+                                mass_error_lower = round(feature_peaks - mass_error,3),
+                                mass_error_upper = round(feature_peaks + mass_error,3))
+    
+    ## Reset rownames
+    rownames(feature_peaks) <- NULL
+    
+    ## fixed objects for exporting to parallel computing
+    fixed_objects <- list(mass_range = mass_range, feature_peaks = feature_peaks)
+    
+    feature_peak_alignment <- function(spectra_list, fixed_objects) {
+      cl <- makeCluster(detectCores() - 1) 
+      registerDoParallel(cl)
   
-  feature_matched_spectra <- feature_peak_alignment(spectra_list, fixed_objects)
+      result <- foreach(i = seq_along(spectra_list), .packages = c('dplyr', 'sqldf')) %:% 
+        foreach(j = seq_along(spectra_list[[i]])) %dopar% {
+      
+          spectrum <- spectra_list[[i]][[j]]
+          feature_peaks <- fixed_objects$feature_peaks
+      
+          feature_matched_spectrum <- sqldf("SELECT feature_peaks.feature_mass, spectrum.*
+          FROM spectrum, feature_peaks
+          WHERE spectrum.mass BETWEEN feature_peaks.mass_error_lower AND feature_peaks.mass_error_upper")
+      
+          ## ADD SAFETY CHECK HERE
+          if (nrow(feature_matched_spectrum) == 0) {
+            ## if no matches, return empty result
+            feature_matched_spectrum <- data.frame(feature_mass = numeric(0), intensity = numeric(0))
+          } else {
+            ## matches found, process normally
+            feature_matched_spectrum <- subset(feature_matched_spectrum, select = -c(mass))
+            feature_matched_spectrum <- aggregate(intensity ~ ., data = feature_matched_spectrum, FUN = sum)
+          }
+      
+          feature_matched_spectrum
+        }
+  
+      stopCluster(cl)
+  
+      return(result)
+    }
+
+    feature_matched_spectra <- feature_peak_alignment(spectra_list, fixed_objects)
+    
+    ## turn list of lists into dataframe
+    feature_matched_spectra <- lapply(feature_matched_spectra, function(x) x %>%
+                                        reduce(full_join,by = "feature_mass")) %>% reduce(full_join,by = "feature_mass")
+    
+    ## sort by target_mz
+    feature_matched_spectra <- feature_matched_spectra[order(feature_matched_spectra$feature_mass), ]
+    
+    
+    ## feature_mass column to rownames
+    feature_matched_spectra <- feature_matched_spectra %>% 
+      remove_rownames %>% 
+      column_to_rownames(var = "feature_mass") %>% 
+      as.data.frame()
+    
+    ## Add sample names as column names
+    colnames(feature_matched_spectra) <- sample_names
+    
+    ## Replace NA with 0
+    feature_matched_spectra <- replace(feature_matched_spectra, is.na(feature_matched_spectra), 0)
+    
+    ## Transpose so rows are samples and columns are masses
+    aligned_spectra <- t(feature_matched_spectra)
+    
+    filtered_mz <- as.numeric(colnames(aligned_spectra))
+  }
 }
-
-feature_matched_spectra <- feature_matched_spectra[lapply(feature_matched_spectra,length)>0]
-
-## turn list of lists into dataframe
-feature_matched_spectra <- lapply(feature_matched_spectra, function(x) x %>%
-                                    reduce(full_join,by = "feature_mass")) %>% 
-  reduce(full_join,by = "feature_mass")
-
-
-## add on rows for filtered_mz peaks not matched to clinical samples
-missing_filt_mz <- subset(filtered_mz, !(filtered_mz %in% feature_matched_spectra$feature_mass))
-missing_df <- data.frame(matrix(ncol = ncol(feature_matched_spectra)-1, nrow = length(missing_filt_mz)))
-missing_df <- cbind(missing_filt_mz, missing_df)
-names(missing_df) <- names(feature_matched_spectra)
-
-feature_matched_spectra <- rbind(feature_matched_spectra, missing_df)
-
-## sort by target_mz
-feature_matched_spectra <- feature_matched_spectra[order(feature_matched_spectra$feature_mass), ]
-
-## feature_mass column to rownames
-feature_matched_spectra <- feature_matched_spectra %>% 
-  remove_rownames %>% 
-  column_to_rownames(var = "feature_mass") %>% 
-  as.data.frame()
-
-## Add sample names as column names
-colnames(feature_matched_spectra) <- sample_names
-
-## Replace NA with 0
-feature_matched_spectra <- replace(feature_matched_spectra, is.na(feature_matched_spectra), 0)
-
-## Transpose so rows are samples and columns are masses
-aligned_spectra <- t(feature_matched_spectra)
 ```
 
 ```{r normalization}
@@ -467,83 +499,68 @@ yall <- foreach(i = 1:length(file_name_list), .combine = c) %do% {
 yall <- factor(yall,levels=c("1","2"),labels = classes)
 ```
 
-``` {r rob training}
-mz.x <- colnames(xall)
-## Look at Rob's rc2 script. I have inserted here a dummy code to match his, but this is where we can match
-## m/z peaks with actual metabolite names
-nams.x <- mz.x
+``` {r training}
+## Extract trained features
+trained_features <- rownames(as.matrix(coef(model)))
+trained_features <- trained_features[trained_features != "(Intercept)"]
 ```
 
 ```{r all pairs}
 ## Below taken from Rob rc2 script for ratio calculations prior to Lasso
 ## Function to compute log ratios with bounds
-compute_logratios_with_bounds <- function(x, feature_names = NULL, min_valid = 10) {
-  n_features <- ncol(x)
+compute_needed_ratios <- function(x, trained_features, min_valid = 10) {
+  feature_splits <- strsplit(trained_features, "/")
+  numerators <- sapply(feature_splits, `[`, 1)
+  denominators <- sapply(feature_splits, `[`, 2)
+  
   n_samples <- nrow(x)
-  n_ratios <- choose(n_features, 2)
+  n_features <- length(trained_features)
+  logratios <- matrix(NA_real_, nrow = n_samples, ncol = n_features)
   
-  ## Initialize
-  logratios <- matrix(NA_real_, nrow = n_samples, ncol = n_ratios)
-  ratio_names <- character(n_ratios)
-  
-  ii <- 0
-  for (j in 1:(n_features - 1)) {
-    for (k in (j+1):n_features) {
-      ii <- ii + 1
-      ratio <- log(x[, j] / x[, k])
+  for (i in seq_along(trained_features)) {
+    num <- numerators[i]
+    denom <- denominators[i]
+    
+    if (num %in% colnames(x) && denom %in% colnames(x)) {
+      ratio <- log(x[, num] / x[, denom])
       
-      ## Identify -Inf and Inf
       neg_inf_mask <- is.infinite(ratio) & ratio < 0
       pos_inf_mask <- is.infinite(ratio) & ratio > 0
       ratio[neg_inf_mask | pos_inf_mask] <- NA
       
-      valid_vals <- ratio[!is.na(ratio)]
+      valid_vals <- ratio[!(neg_inf_mask | pos_inf_mask)]
       
-      ## Calculate quantiles per ratio
       if (length(valid_vals) >= min_valid) {
-        q01 <- quantile(valid_vals, 0.01)
-        q99 <- quantile(valid_vals, 0.99)
+        q01 <- quantile(valid_vals, 0.01, na.rm = TRUE)
+        q99 <- quantile(valid_vals, 0.99, na.rm = TRUE)
+        med <- median(valid_vals)
+        
+        ratio[neg_inf_mask] <- q01
+        ratio[pos_inf_mask] <- q99
+        ratio[is.na(ratio)] <- med
+        
+        logratios[, i] <- ratio
       } else {
-        q01 <- quantile(ratio, 0.01, na.rm = TRUE)
-        q99 <- quantile(ratio, 0.99, na.rm = TRUE)
+        ## Not enough valid data — leave this ratio column as NA
+        logratios[, i] <- NA
       }
-      
-      ## Restore directionality of -Inf and +Inf
-      ratio[neg_inf_mask] <- q01
-      ratio[pos_inf_mask] <- q99
-      
-      logratios[, ii] <- ratio
-      if (!is.null(feature_names)) {
-        ratio_names[ii] <- paste0(feature_names[j], "/", feature_names[k])
-      } else {
-        ratio_names[ii] <- paste0("V", j, "/V", k)
-      }
+    } else {
+      ## Missing features — leave this ratio as NA
+      logratios[, i] <- NA
     }
   }
   
-  colnames(logratios) <- ratio_names
-  return(list(logratios = logratios, ratio_names = ratio_names))
+  colnames(logratios) <- trained_features
+  return(logratios)
 }
 
 ## Perform log ratio lasso
-res <- compute_logratios_with_bounds(x = xall, feature_names = colnames(xall))
-allpairs <- res$logratios
-nams.p <- res$ratio_names
+xall <- compute_needed_ratios(x = xall, trained_features = trained_features)
 
-## Remove any features with remaining NAs
-na_free_cols <- colSums(is.na(allpairs)) == 0
-allpairs <- allpairs[, na_free_cols, drop = FALSE]
-nams.p <- nams.p[na_free_cols]
-xall <- allpairs
-
-## Ensure same features exist as from the model
-# Extract feature names used in training
-trained_features <- rownames(as.matrix(coef(model)))  # includes "(Intercept)"
-trained_features <- trained_features[trained_features != "(Intercept)"]
-
-# Ensure xall has all these columns in the correct order
-xall <- xall[, trained_features, drop = FALSE]
-
+## Remove any ratio columns that have only NA values
+valid_ratios <- colSums(!is.na(xall)) >= 10 # Dependent on min_valid above
+xall <- xall[, valid_ratios, drop = FALSE]
+trained_features <- colnames(xall)
 ```
 
 ```{r Testing}
