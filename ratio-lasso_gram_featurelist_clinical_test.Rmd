@@ -499,73 +499,82 @@ yall <- foreach(i = 1:length(file_name_list), .combine = c) %do% {
 yall <- factor(yall,levels=c("1","2"),labels = classes)
 ```
 
-``` {r training}
+```{r all pairs}
 ## Extract trained features
 trained_features <- rownames(as.matrix(coef(model)))
 trained_features <- trained_features[trained_features != "(Intercept)"]
-```
 
-```{r all pairs}
 ## Below taken from Rob rc2 script for ratio calculations prior to Lasso
 ## Function to compute log ratios with bounds
-compute_needed_ratios <- function(x, trained_features, min_valid = 10) {
+compute_needed_ratios <- function(x, trained_features) {
   feature_splits <- strsplit(trained_features, "/")
   numerators <- sapply(feature_splits, `[`, 1)
   denominators <- sapply(feature_splits, `[`, 2)
-  
+
   n_samples <- nrow(x)
   n_features <- length(trained_features)
   logratios <- matrix(NA_real_, nrow = n_samples, ncol = n_features)
-  
+
   for (i in seq_along(trained_features)) {
     num <- numerators[i]
     denom <- denominators[i]
-    
+
     if (num %in% colnames(x) && denom %in% colnames(x)) {
       ratio <- log(x[, num] / x[, denom])
-      
+
+      # Identify Inf/-Inf and calculate valid values
       neg_inf_mask <- is.infinite(ratio) & ratio < 0
       pos_inf_mask <- is.infinite(ratio) & ratio > 0
-      ratio[neg_inf_mask | pos_inf_mask] <- NA
-      
-      valid_vals <- ratio[!(neg_inf_mask | pos_inf_mask)]
-      
-      if (length(valid_vals) >= min_valid) {
+      finite_mask <- !(neg_inf_mask | pos_inf_mask | is.na(ratio))
+      valid_vals <- ratio[finite_mask]
+
+      if (length(valid_vals) >= 1) {
+        # Bound extremes
         q01 <- quantile(valid_vals, 0.01, na.rm = TRUE)
         q99 <- quantile(valid_vals, 0.99, na.rm = TRUE)
-        med <- median(valid_vals)
-        
+
         ratio[neg_inf_mask] <- q01
         ratio[pos_inf_mask] <- q99
-        ratio[is.na(ratio)] <- med
-        
+
+        # Leave other NA values as NA (do not impute)
         logratios[, i] <- ratio
       } else {
-        ## Not enough valid data — leave this ratio column as NA
+        # Not enough signal — keep column all NA
         logratios[, i] <- NA
       }
     } else {
-      ## Missing features — leave this ratio as NA
+      # Missing features
       logratios[, i] <- NA
     }
   }
-  
+
   colnames(logratios) <- trained_features
   return(logratios)
 }
 
 ## Perform log ratio lasso
-xall <- compute_needed_ratios(x = xall, trained_features = trained_features)
+xall1 <- compute_needed_ratios(x = xall, trained_features = trained_features)
 
 ## Remove any ratio columns that have only NA values
-valid_ratios <- colSums(!is.na(xall)) >= 10 # Dependent on min_valid above
-xall <- xall[, valid_ratios, drop = FALSE]
-trained_features <- colnames(xall)
+xall1[is.na(xall1)] <- 0
+
+## Extract trained features
+missing_features <- setdiff(trained_features, colnames(xall1))
+
+## Add in missing features to match what was trained
+xall1 <- as.data.frame(xall1)
+if (length(missing_features) > 0) {
+  for (x in missing_features) {
+    xall1[[x]] <- 0
+  }
+}
+xall1 <- xall1[, trained_features]
+xall1 <- as.matrix(xall1)
 ```
 
 ```{r Testing}
 test_p <- predict(model,
-                  xall,
+                  xall1,
                   s = cvmodel$lambda.min, ## Value of the penalty parameter lambda at which predictions are required
                   type = "response" ) ## to get prediction values rather than linker function values
 ```
@@ -596,15 +605,15 @@ test_wrong_preds <- test_df %>%
 ```{r save files, include = FALSE}
 ## test set files
 write.csv(test_cm, 
-          file = file.path(out_dir, files_dir, "test_cm.csv"))
+          file = file.path(files_dir, "test_cm.csv"))
 
 write.csv(test_df, 
           row.names = FALSE,
-          file.path(out_dir, files_dir, "test_preds.csv"))
+          file.path(files_dir, "test_preds.csv"))
 
 write.csv(test_wrong_preds, 
           row.names = FALSE,
-          file.path(out_dir, files_dir, "misclassified_test_preds.csv"))
+          file.path(files_dir, "misclassified_test_preds.csv"))
 ```
 
 <br>
