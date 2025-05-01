@@ -96,7 +96,7 @@ clust_h <- 0.05 ## Height at which to cut dendrogram to determine clusters
 clust_int_method  <-  "sumints" ## Handling of multiple intensities aggregating to one cluster centroid: "sumints" or "maxint"
 
 ## If peak alignment method is "featurelist":
-ppm_error <- 10 ## Mass error tolerance of sample peaks to match to feature peaks
+ppm_error <- 5 ## Mass error tolerance of sample peaks to match to feature peaks
 
 ## Normalization Method: "tic", "maxpeak", "median", "medianlog", or "none"
 normalization_method <- "tic" 
