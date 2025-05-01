@@ -450,17 +450,16 @@ compute_logratios_with_bounds <- function(x, feature_names = NULL, min_valid = 1
       if (length(valid_vals) >= min_valid) {
         q01 <- quantile(valid_vals, 0.01)
         q99 <- quantile(valid_vals, 0.99)
-        med <- median(valid_vals)
+        
       } else {
         q01 <- quantile(ratio, 0.01, na.rm = TRUE)
         q99 <- quantile(ratio, 0.99, na.rm = TRUE)
-        med <- median(ratio, na.rm = TRUE)
       }
       
       ## Restore directionality of -Inf and +Inf
       ratio[neg_inf_mask] <- q01
       ratio[pos_inf_mask] <- q99
-      ratio[is.na(ratio)] <- med
+      ratio[is.na(ratio)] <- 0
       
       logratios[, ii] <- ratio
       if (!is.null(feature_names)) {
