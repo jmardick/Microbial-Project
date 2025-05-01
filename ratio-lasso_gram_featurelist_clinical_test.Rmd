@@ -69,7 +69,7 @@ library(scales) ## for integer y-axis on histogram
 
 ```{r user input}
 ## processing settings and model file
-model_path <- gsub("\\\\", "/", r"(C:\Users\Jacob\Box\Eberlin_Lab_BCM\Projects\Bacterial Identification\Jacob_scripts\ratio-lasso_gram_featurelist_2025-05-01\2025-05-01_11.29_ratio-lasso_gram_featurelist_files\2025-05-01_11.35_ratio-lasso_gram_featurelist_model.RData)")
+model_path <- gsub("\\\\", "/", r"(C:\Users\Jacob\Documents\Manoj\Microbial-Project\outputs\ratio-lasso_gram_featurelist_2025-05-01\2025-05-01_12.02_ratio-lasso_gram_featurelist_files\2025-05-01_12.10_ratio-lasso_gram_featurelist_model.RData)")
 
 ## Full path to folder with sample files (excel or csv, or raw Thermo files)
 sample_dir <- gsub("\\\\", "/", r"(C:\Users\Jacob\Box\Eberlin_Lab_BCM\Projects\Bacterial Identification\data\clinical_patient_samples\MSPen\negative_ion_mode\solvent_MeOH)")
@@ -506,7 +506,7 @@ trained_features <- trained_features[trained_features != "(Intercept)"]
 
 ## Below taken from Rob rc2 script for ratio calculations prior to Lasso
 ## Function to compute log ratios with bounds
-compute_needed_ratios <- function(x, trained_features, min_valid = 1) {
+compute_needed_ratios <- function(x, trained_features, min_valid = 10) {
   feature_splits <- strsplit(trained_features, "/")
   numerators <- sapply(feature_splits, `[`, 1)
   denominators <- sapply(feature_splits, `[`, 2)
@@ -533,18 +533,15 @@ compute_needed_ratios <- function(x, trained_features, min_valid = 1) {
         # Bound extremes
         q01 <- quantile(valid_vals, 0.01)
         q99 <- quantile(valid_vals, 0.99)
-        med <- median(valid_vals)
         
       } else {
         q01 <- quantile(valid_vals, 0.01, na.rm = TRUE)
         q99 <- quantile(valid_vals, 0.99, na.rm = TRUE)
-        med <- median(valid_vals, na.rm = TRUE)
       }
       
       ## Restore directionality of -Inf and +Inf
       ratio[neg_inf_mask] <- q01
       ratio[pos_inf_mask] <- q99
-      ratio[is.na(ratio)] <- med
       
       logratios[, i] <- ratio
       
