@@ -86,7 +86,7 @@ background_file <- NULL
 ## ---------------------------------------------------------------------------
 
 ## Mass range to filter
-mass_range <- c(700,1000)
+mass_range <- c(100,1000)
 
 ## Peak Alignment Method: "clustering" or "featurelist"
 peak_alignment_method <- "featurelist"

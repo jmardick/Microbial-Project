@@ -69,7 +69,7 @@ library(scales) ## for integer y-axis on histogram
 
 ```{r user input}
 ## processing settings and model file
-model_path <- gsub("\\\\", "/", r"(C:\Users\Jacob\Documents\Manoj\Microbial-Project\outputs\ratio-lasso_gram_featurelist_2025-05-01\2025-05-01_12.02_ratio-lasso_gram_featurelist_files\2025-05-01_12.10_ratio-lasso_gram_featurelist_model.RData)")
+model_path <- gsub("\\\\", "/", r"(C:\Users\Jacob\Documents\Manoj\Microbial-Project\outputs\ratio-lasso_gram_featurelist_2025-05-01\2025-05-01_14.36_ratio-lasso_gram_featurelist_files\2025-05-01_15.36_ratio-lasso_gram_featurelist_model.RData)")
 
 ## Full path to folder with sample files (excel or csv, or raw Thermo files)
 sample_dir <- gsub("\\\\", "/", r"(C:\Users\Jacob\Box\Eberlin_Lab_BCM\Projects\Bacterial Identification\data\clinical_patient_samples\MSPen\negative_ion_mode\solvent_MeOH)")
