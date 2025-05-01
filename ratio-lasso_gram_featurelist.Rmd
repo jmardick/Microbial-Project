@@ -5,7 +5,7 @@ author: "Jacob Mardick"
 date: "`r format(Sys.time(), '%B %d, %Y %H:%M')`"
 knit: (function(inputFile, encoding) { 
       proj_name <- tools::file_path_sans_ext(basename(inputFile));
-      out_dir <- paste0(proj_name, "_", Sys.Date());
+      out_dir <- file.path("outputs", paste0(proj_name, "_", Sys.Date()));
       if(!file.exists(out_dir)) {   dir.create(out_dir) };
       rmarkdown::render(inputFile,
                         encoding=encoding, 
@@ -96,7 +96,7 @@ clust_h <- 0.05 ## Height at which to cut dendrogram to determine clusters
 clust_int_method  <-  "sumints" ## Handling of multiple intensities aggregating to one cluster centroid: "sumints" or "maxint"
 
 ## If peak alignment method is "featurelist":
-ppm_error <- 5 ## Mass error tolerance of sample peaks to match to feature peaks
+ppm_error <- 10 ## Mass error tolerance of sample peaks to match to feature peaks
 
 ## Normalization Method: "tic", "maxpeak", "median", "medianlog", or "none"
 normalization_method <- "tic" 
@@ -113,13 +113,17 @@ seed <- 1234
 ```{r create directory for output files, include = FALSE}
 proj_name <- tools::file_path_sans_ext(basename(rstudioapi::getSourceEditorContext()$path))
 
-out_dir <- paste0(proj_name, "_", Sys.Date())
+out_dir <- file.path("outputs", paste0(proj_name, "_", Sys.Date()))
 
-if(!file.exists(out_dir)) {   dir.create(out_dir) }
+if(!file.exists(out_dir)) {   
+  dir.create(out_dir, recursive = TRUE) 
+  }
 
-files_dir <- paste0(format(Sys.time(), "%Y-%m-%d_%H.%M"), "_", proj_name, "_files")
+files_dir <- file.path(out_dir, paste0(format(Sys.time(), "%Y-%m-%d_%H.%M"), "_", proj_name, "_files"))
 
-if(!file.exists(file.path(out_dir,files_dir))) {   dir.create(file.path(out_dir,files_dir)) }
+if(!file.exists(files_dir)) {   
+  dir.create(files_dir, recursive = TRUE) 
+  }
 ```
 
 ```{r file extension}
@@ -254,7 +258,7 @@ if (peak_alignment_method == "clustering") {
   preprocList <- lapply(clusterMatrixList, function(x) as.matrix(get_data_matrix_clustering(x)))
   
   save(preprocList, 
-       file = file.path(out_dir, files_dir, 
+       file = file.path(files_dir, 
                         paste0(peak_alignment_method,
                                "_h", clust_h, clust_int_method,
                                "_preprocList.RData")))
@@ -595,52 +599,52 @@ test_wrong_preds <- test_df %>%
 ```
 
 ```{r save model, include=FALSE}
-save(model, cvmodel, filtered_mz, best_threshold,mass_range, ppm_error, normalization_method, seed, classes, lasso_coef,
-     file=file.path(out_dir, files_dir, paste0(format(Sys.time(), "%Y-%m-%d_%H.%M"),"_",proj_name, "_model.RData")))
+save(model, cvmodel, filtered_mz, best_threshold,mass_range, ppm_error, normalization_method, seed, classes, lasso_coef, peak_alignment_method,
+     file=file.path(files_dir, paste0(format(Sys.time(), "%Y-%m-%d_%H.%M"),"_",proj_name, "_model.RData")))
 ```
 
 ```{r}
-save(list = ls(), file=file.path(out_dir, files_dir, paste0(format(Sys.time(), "%Y-%m-%d_%H.%M"),"_",proj_name, "_ALL.RData")))
+save(list = ls(), file=file.path(files_dir, paste0(format(Sys.time(), "%Y-%m-%d_%H.%M"),"_",proj_name, "_ALL.RData")))
 ```
 
 ```{r save files, include = FALSE}
 ## training set files
 
 write.csv(cv_cm, 
-          file = file.path(out_dir, files_dir, "train_cm.csv"))
+          file = file.path(files_dir, "train_cm.csv"))
 
 write.csv(train_df, 
           row.names = FALSE,
-          file.path(out_dir, files_dir, "train_preds.csv"))
+          file.path(files_dir, "train_preds.csv"))
 
 write.csv(train_wrong_preds, 
           row.names = FALSE,
-          file.path(out_dir, files_dir, "misclassified_train_preds.csv"))
+          file.path(files_dir, "misclassified_train_preds.csv"))
 
 write.csv(as.matrix(lasso_coef), 
-          file.path(out_dir, files_dir, "lasso_coefficients.csv"))
+          file.path(files_dir, "lasso_coefficients.csv"))
 
 ## test set files
 
 write.csv(test_cm, 
-          file = file.path(out_dir, files_dir, "test_cm.csv"))
+          file = file.path(files_dir, "test_cm.csv"))
 
 write.csv(test_df, 
           row.names = FALSE,
-          file.path(out_dir, files_dir, "test_preds.csv"))
+          file.path(files_dir, "test_preds.csv"))
 
 write.csv(test_wrong_preds, 
           row.names = FALSE,
-          file.path(out_dir, files_dir, "misclassified_test_preds.csv"))
+          file.path(files_dir, "misclassified_test_preds.csv"))
 ```
 
 ```{r save plots, include=FALSE}
-png(filename=file.path(out_dir, files_dir, "cv_plot.png"))
+png(filename=file.path(files_dir, "cv_plot.png"))
 plot(cvmodel)
 title("cross-validation curve : binomial family", line = 2.5)
 dev.off()
 
-png(filename=file.path(out_dir, files_dir, "roc_plot.png"))
+png(filename=file.path(files_dir, "roc_plot.png"))
 plot(roc_curve, 
      print.thres="best", 
      print.thres.best.method="youden",
@@ -649,7 +653,7 @@ plot(roc_curve,
      main = "ROC Curve")
 dev.off()
 
-ggsave(roc_metrics, filename = file.path(out_dir, files_dir, "roc_metrics_thresh.png"))
+ggsave(roc_metrics, filename = file.path(files_dir, "roc_metrics_thresh.png"))
 ```
 
 <br>
@@ -894,8 +898,8 @@ test_plot <- ggplot(test_df, aes(x=probability, fill=true_class, color=true_clas
 ```
 
 ```{r}
-ggsave(plot=train_plot, filename = file.path(out_dir, files_dir, "train_histogram.png"), bg = "white")
-ggsave(plot=test_plot, filename = file.path(out_dir, files_dir, "test_histogram.png"), bg = "white")
+ggsave(plot=train_plot, filename = file.path(files_dir, "train_histogram.png"), bg = "white")
+ggsave(plot=test_plot, filename = file.path(files_dir, "test_histogram.png"), bg = "white")
 ```
 
 ```{r chunk10}
