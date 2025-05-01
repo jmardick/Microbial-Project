@@ -5,7 +5,7 @@ author: "<span style='font-size: 17px;'>`r Sys.info()[['user']]`</span><br><span
 date: "<span style='font-size: 15px; color: black;'>`r format(Sys.time(), '%B %d, %Y %H:%M')`</span>"
 knit: (function(inputFile, encoding) { 
       proj_name <- tools::file_path_sans_ext(basename(inputFile));
-      out_dir <- paste0(proj_name, "_", Sys.Date());
+      out_dir <- file.path("outputs", paste0(proj_name, "_", Sys.Date()));
       if(!file.exists(out_dir)) {   dir.create(out_dir) };
       rmarkdown::render(inputFile,
                         encoding=encoding, 
@@ -69,7 +69,7 @@ library(scales) ## for integer y-axis on histogram
 
 ```{r user input}
 ## processing settings and model file
-model_path <- gsub("\\\\", "/", r"(C:\Users\Jacob\Box\Eberlin_Lab_BCM\Projects\Bacterial Identification\Jacob_scripts\ratio-lasso_gram_featurelist_2025-04-17\2025-04-17_11.47_ratio-lasso_gram_featurelist_files\2025-04-17_11.52_ratio-lasso_gram_featurelist_model.RData)")
+model_path <- gsub("\\\\", "/", r"(C:\Users\Jacob\Box\Eberlin_Lab_BCM\Projects\Bacterial Identification\Jacob_scripts\ratio-lasso_gram_featurelist_2025-05-01\2025-05-01_11.29_ratio-lasso_gram_featurelist_files\2025-05-01_11.35_ratio-lasso_gram_featurelist_model.RData)")
 
 ## Full path to folder with sample files (excel or csv, or raw Thermo files)
 sample_dir <- gsub("\\\\", "/", r"(C:\Users\Jacob\Box\Eberlin_Lab_BCM\Projects\Bacterial Identification\data\clinical_patient_samples\MSPen\negative_ion_mode\solvent_MeOH)")
@@ -362,7 +362,7 @@ if (peak_alignment_method == "clustering") {
   preprocList <- lapply(clusterMatrixList, function(x) as.matrix(get_data_matrix_clustering(x)))
   
   save(preprocList, 
-       file = file.path(out_dir, files_dir, 
+       file = file.path(files_dir, 
                         paste0(peak_alignment_method,
                                "_h", clust_h, clust_int_method,
                                "_preprocList.RData")))
@@ -501,12 +501,12 @@ yall <- factor(yall,levels=c("1","2"),labels = classes)
 
 ```{r all pairs}
 ## Extract trained features
-trained_features <- rownames(as.matrix(coef(model)))
+trained_features <- rownames(as.matrix(coef(model, s = cvmodel$lambda.min)))
 trained_features <- trained_features[trained_features != "(Intercept)"]
 
 ## Below taken from Rob rc2 script for ratio calculations prior to Lasso
 ## Function to compute log ratios with bounds
-compute_needed_ratios <- function(x, trained_features) {
+compute_needed_ratios <- function(x, trained_features, min_valid = 1) {
   feature_splits <- strsplit(trained_features, "/")
   numerators <- sapply(feature_splits, `[`, 1)
   denominators <- sapply(feature_splits, `[`, 2)
@@ -525,23 +525,29 @@ compute_needed_ratios <- function(x, trained_features) {
       # Identify Inf/-Inf and calculate valid values
       neg_inf_mask <- is.infinite(ratio) & ratio < 0
       pos_inf_mask <- is.infinite(ratio) & ratio > 0
-      finite_mask <- !(neg_inf_mask | pos_inf_mask | is.na(ratio))
-      valid_vals <- ratio[finite_mask]
+      ratio[neg_inf_mask | pos_inf_mask] <- NA
 
-      if (length(valid_vals) >= 1) {
+      valid_vals <- ratio[!is.na(ratio)]
+
+      if (length(valid_vals) >= min_valid) {
         # Bound extremes
+        q01 <- quantile(valid_vals, 0.01)
+        q99 <- quantile(valid_vals, 0.99)
+        med <- median(valid_vals)
+        
+      } else {
         q01 <- quantile(valid_vals, 0.01, na.rm = TRUE)
         q99 <- quantile(valid_vals, 0.99, na.rm = TRUE)
-
-        ratio[neg_inf_mask] <- q01
-        ratio[pos_inf_mask] <- q99
-
-        # Leave other NA values as NA (do not impute)
-        logratios[, i] <- ratio
-      } else {
-        # Not enough signal — keep column all NA
-        logratios[, i] <- NA
+        med <- median(valid_vals, na.rm = TRUE)
       }
+      
+      ## Restore directionality of -Inf and +Inf
+      ratio[neg_inf_mask] <- q01
+      ratio[pos_inf_mask] <- q99
+      ratio[is.na(ratio)] <- med
+      
+      logratios[, i] <- ratio
+      
     } else {
       # Missing features
       logratios[, i] <- NA
@@ -756,5 +762,5 @@ kable(test_samples,
 ```
 
 ```{r R data, include = FALSE}
-save(list = ls(), file=file.path(out_dir, files_dir, paste0(format(Sys.time(), "%Y-%m-%d_%H.%M"),"_", proj_name, "_.RData")))
+save(list = ls(), file=file.path(files_dir, paste0(format(Sys.time(), "%Y-%m-%d_%H.%M"),"_", proj_name, "_.RData")))
 ```
