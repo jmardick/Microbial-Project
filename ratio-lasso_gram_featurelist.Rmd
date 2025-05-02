@@ -78,7 +78,7 @@ library(scales) ## for integer y-axis on histogram
 sample_dir <- gsub("\\\\", "/", r"(C:\Users\Jacob\Box\Eberlin_Lab_BCM\Projects\Bacterial Identification\data\culture_isolates\MSPen\negative_ion_mode\solvent_MeOH)")
 
 ## Full path to feature list, otherwise NULL
-feature_file <- gsub("\\\\", "/", r"(C:\Users\Jacob\Box\Eberlin_Lab_BCM\Projects\Bacterial Identification\feature_peak_lists\20250130_combined_tsm_manoj_gram_features.xlsx)")
+feature_file <- gsub("\\\\", "/", r"(C:\Users\Jacob\Box\Eberlin_Lab_BCM\People\MANOJ\Manuscript\PNAS_APR_2025\lipid Ratio mz.xlsx)")
 
 ## Full path to background peak list, otherwise NULL
 background_file <- NULL
@@ -341,14 +341,20 @@ if (peak_alignment_method == "featurelist") {
           feature_peaks <- fixed_objects$feature_peaks
           
           feature_matched_spectrum <- sqldf("SELECT feature_peaks.feature_mass, spectrum.*
-          FROM spectrum,feature_peaks
-          WHERE spectrum.mass between feature_peaks.mass_error_lower AND feature_peaks.mass_error_upper")
-          
-          ## remove mass columns
-          feature_matched_spectrum <- subset(feature_matched_spectrum, select = -c(mass))
-          
-          ## sum intensities of duplicates
-          feature_matched_spectrum <- aggregate(intensity ~ ., data = feature_matched_spectrum, FUN = sum)
+          FROM spectrum, feature_peaks
+          WHERE spectrum.mass BETWEEN feature_peaks.mass_error_lower AND feature_peaks.mass_error_upper")
+      
+          ## ADD SAFETY CHECK HERE
+          if (nrow(feature_matched_spectrum) == 0) {
+            ## if no matches, return empty result
+            feature_matched_spectrum <- data.frame(feature_mass = numeric(0), intensity = numeric(0))
+          } else {
+            ## matches found, process normally
+            feature_matched_spectrum <- subset(feature_matched_spectrum, select = -c(mass))
+            feature_matched_spectrum <- aggregate(intensity ~ ., data = feature_matched_spectrum, FUN = sum)
+          }
+      
+          feature_matched_spectrum
         }
       stopCluster(cl)
       return(result)
