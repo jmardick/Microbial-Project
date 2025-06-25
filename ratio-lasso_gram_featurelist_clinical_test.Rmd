@@ -1,6 +1,6 @@
 ---
 title: "<span style='text-align: left;font-size: 25px;'>Culture-free Identification of Bacterial Infections with Ratio Lasso</span>"
-subtitle: "<span style='font-size: 20px;'>Gram Prediction m/z 700 - 1000 with Feature List</span><br><span style='font-size: 18px;color: #696969;'>Test Model with Clinical Patient Samples</span>"
+subtitle: "<span style='font-size: 20px;'>Gram Prediction m/z 100 - 1000 with Feature List</span><br><span style='font-size: 18px;color: #696969;'>Test Model with Clinical Patient Samples</span>"
 author: "<span style='font-size: 17px;'>`r Sys.info()[['user']]`</span><br><span style='font-size: 12px; color:#696969;'>Eberlin Lab, Department of Surgery<br>Baylor College of Medicine</span>"
 date: "<span style='font-size: 15px; color: black;'>`r format(Sys.time(), '%B %d, %Y %H:%M')`</span>"
 knit: (function(inputFile, encoding) { 
@@ -69,15 +69,13 @@ library(scales) ## for integer y-axis on histogram
 
 ```{r user input}
 ## processing settings and model file
-model_path <- gsub("\\\\", "/", r"(C:\Users\Jacob\Documents\Manoj\Microbial-Project\outputs\ratio-lasso_gram_featurelist_2025-05-01\2025-05-01_14.36_ratio-lasso_gram_featurelist_files\2025-05-01_15.36_ratio-lasso_gram_featurelist_model.RData)")
+model_path <- gsub("\\\\", "/", r"(C:\Users\Jacob\OneDrive - Baylor College of Medicine\Documents\Manoj\Microbial-Project\outputs\ratio-lasso_gram_featurelist_2025-06-23\2025-06-23_16.12_ratio-lasso_gram_featurelist_files\2025-06-23_17.31_ratio-lasso_gram_featurelist_model.RData)")
 
 ## Full path to folder with sample files (excel or csv, or raw Thermo files)
-sample_dir <- gsub("\\\\", "/", r"(C:\Users\Jacob\Box\Eberlin_Lab_BCM\Projects\Bacterial Identification\data\clinical_patient_samples\MSPen\negative_ion_mode\solvent_MeOH)")
-
-high_inf_file <- gsub("\\\\", "/", r"(C:\Users\Jacob\Box\Eberlin_Lab_BCM\Projects\Bacterial Identification\Faith_scripts\highly_infected_clinical_patient_samples_ids.xlsx)")
+sample_dir <- gsub("\\\\", "/", r"(C:\Users\Jacob\Box\Eberlin_Lab_BCM\People\MANOJ\Renamed_Gram_positive_Gram_negative_Isolates_May2025\Highly Infected sample\Extracted Data excel sheet)")
 
 ## Full path to feature list, otherwise NULL
-feature_file <- gsub("\\\\", "/", r"(C:\Users\Jacob\Box\Eberlin_Lab_BCM\Projects\Bacterial Identification\feature_peak_lists\20250130_combined_tsm_manoj_gram_features.xlsx)")
+feature_file <- gsub("\\\\", "/", r"(C:\Users\Jacob\Box\Eberlin_Lab_BCM\People\MANOJ\Renamed_Gram_positive_Gram_negative_Isolates_May2025\molecular Identity with Chemical  Formula\Microbes_Identified_features_May_2025.xlsx)")
 ```
 
 ```{r create directory for output files, include = FALSE}
@@ -129,13 +127,6 @@ sample_names_df <- purrr::map_df(sample_names_list, ~as.data.frame(.x), .id="id"
 file_name_df <- purrr::map_df(file_name_list, ~as.data.frame(.x), .id="id")
 sample_names_df <- cbind(substr(sample_names, 1, 4), sample_names_df, file_name_df[2])
 colnames(sample_names_df) <- c("sample_id", "class", "sample_name", "file_name")
-
-#high_inf_ids <- read_excel(high_inf_file, col_names = "sample_id")
-#sample_names_df <- merge(sample_names_df, high_inf_ids, by = "sample_id")
-
-#file_name_list <- split(sample_names_df$file_name, sample_names_df$class)
-#sample_names_list <- split(sample_names_df$sample_name, sample_names_df$class)
-#sample_names <- sample_names_df$sample_name
 ```
 
 ```{r csv data}
@@ -408,7 +399,7 @@ if (peak_alignment_method == "clustering") {
     feature_df <- read_excel(feature_file, col_names = TRUE)
     ## TODO: What if CSV file?
     
-    feature_peaks <- unlist(feature_df[,1])
+    feature_peaks <- unlist(feature_df[,2])
     
     ## Feature mz plus/minus instrument mass error, round to 3 decimal places
     mass_error <- unlist((ppm_error * feature_peaks)/1e6)
@@ -758,6 +749,134 @@ kable(test_samples,
                 font_size = 12)
 ```
 
-```{r R data, include = FALSE}
-save(list = ls(), file=file.path(files_dir, paste0(format(Sys.time(), "%Y-%m-%d_%H.%M"),"_", proj_name, "_.RData")))
+```{r pca}
+# Run PCA
+pca <- prcomp(xall, center = TRUE, scale. = TRUE)
+
+# Calculate variance explained
+var_explained <- (pca$sdev)^2 / sum(pca$sdev^2)
+pc_labels <- paste0("PC", 1:2, " (", round(var_explained[1:2] * 100, 1), "%)")
+
+# Create PCA data frame
+pca_df <- data.frame(PC1 = pca$x[, 1],
+                     PC2 = pca$x[, 2],
+                     class = yall)
+
+
+plot4 <- ggplot(pca_df, aes(x = PC1, y = PC2, color = class)) +
+  geom_point(alpha = 0.5, size = 1.2) +
+  labs(
+    title = "PCA of All Samples by Class", 
+    x = paste0("PC1 (", round(summary(pca)$importance[2, 1] * 100, 1), "%)"),
+    y = paste0("PC2 (", round(summary(pca)$importance[2, 2] * 100, 1), "%)"),
+    color = "Class"
+  ) +
+  theme_minimal() +
+  theme(legend.position = "right",
+        plot.title = element_text(size = 22, hjust = 0.5),
+        axis.title.x = element_text(size = 16),
+        axis.title.y = element_text(size = 16),
+        legend.title = element_text(size = 16),
+        legend.text = element_text(size = 14)
+        ) +
+  guides(color = guide_legend(override.aes = list(size = 4)))
+
+ggsave(plot4, 
+       width = 8,        # wider than default
+       height = 8,        # adjust as needed for aspect ratio
+       units = "in",      # specify inches
+       dpi = 300,  
+       file = file.path(files_dir, paste0("pca_class.png"))
+       )
+
+# Variance explained
+var_explained <- pca$sdev^2 / sum(pca$sdev^2)
+
+# Create a data frame for plotting
+elbow_df <- data.frame(
+  PC = paste0("PC", 1:length(var_explained)),
+  Variance = var_explained
+)
+
+# Plot
+plot5 <- ggplot(elbow_df[1:36, ], aes(x = seq_along(Variance), y = Variance)) +
+  geom_line() +
+  geom_point() +
+  # scale_x_continuous(breaks = 1:20) +
+  labs(title = "PCA Scree Plot",
+       x = "Principal Component",
+       y = "Proportion of Variance Explained") +
+  theme_minimal() +
+  theme(plot.title = element_text(size = 22, hjust = 0.5),
+        axis.title.x = element_text(size = 16),
+        axis.title.y = element_text(size = 16),
+        axis.text.x = element_text(size = 14),
+        axis.text.y = element_text(size = 14)
+        )
+
+ggsave(plot5, 
+       width = 4.67,        # wider than default
+       height = 7,        # adjust as needed for aspect ratio
+       units = "in",      # specify inches
+       dpi = 300,  
+       file = file.path(files_dir, paste0("scree-plot.png"))
+       )
+```
+
+```{r tsne}
+library(Rtsne)
+
+# Use top 20 PCs (adjust based on the elbow)
+pca_input <- pca$x[, 1:20]
+dupe_idx <- !duplicated(pca_input)  # TRUE for rows kept
+# Remove duplicate rows
+pca_input_unique <- pca_input[dupe_idx, ]
+
+# Store mapping to original rows if you need to join later
+pca_input_idx <- match(data.frame(t(pca_input_unique)) |> as.list(), 
+                       data.frame(t(pca_input)) |> as.list())
+
+# Run t-SNE on unique inputs
+set.seed(42)
+tsne_result <- Rtsne(pca_input_unique, dims = 2, perplexity = 2, max_iter = 1000, verbose = TRUE)
+
+# Now map the t-SNE result back
+tsne_coords <- matrix(NA, nrow = nrow(pca_input), ncol = 2)
+tsne_coords[dupe_idx, ] <- tsne_result$Y  # fill only the non-duplicated rows
+
+# Make data.frame for plotting
+tsne_df <- data.frame(
+  X = tsne_coords[, 1],
+  Y = tsne_coords[, 2],
+  class = yall,
+  sample = sample_names_df$sample_id
+)
+
+tsne_df_clean <- tsne_df[complete.cases(tsne_df[, c("X", "Y")]), ]
+
+plot6 <- ggplot(tsne_df_clean, aes(x = X, y = Y, color = class)) +
+  geom_point(alpha = 0.5, size = 1.2) +
+  theme_minimal() +
+  labs(title = "t-SNE of Top 20 PCs", color = "Class") +
+  guides(
+    color = guide_legend(override.aes = list(size = 3)),   # increase color dot size
+  ) +
+  theme(
+    axis.title = element_blank(),
+    axis.text = element_blank(),
+    axis.ticks = element_blank(),
+    panel.grid = element_blank(),
+    legend.title = element_text(size = 16),
+    legend.text = element_text(size = 14),
+    legend.position = "right",
+    plot.title = element_text(hjust = 0.5, size = 18)
+  )
+plot6
+ggsave(plot6, 
+       width = 4.67,        # wider than default
+       height = 7,        # adjust as needed for aspect ratio
+       units = "in",      # specify inches
+       dpi = 300,  
+       file = file.path(files_dir, paste0("tsne_class.png"))
+       )
 ```

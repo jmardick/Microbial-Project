@@ -1,6 +1,6 @@
 ---
 title: "Ratio Lasso - Gram Stain Prediction"
-subtitle: "m/z 700 - 1000 Feature List"
+subtitle: "Renamed Sample Files"
 author: "Jacob Mardick"
 date: "`r format(Sys.time(), '%B %d, %Y %H:%M')`"
 knit: (function(inputFile, encoding) { 
@@ -75,10 +75,10 @@ library(scales) ## for integer y-axis on histogram
 ```{r user input}
 ## Full path to folder with sample files (excel or csv, or raw Thermo files)
 ## PASTE PATH IN BETWEEN INNER PARENTHASIS WITH QUOTES ON THE OUTSIDE -- NO NEED TO CHANGE BACKSLASHES TO FORWARD SLASHES
-sample_dir <- gsub("\\\\", "/", r"(C:\Users\Jacob\Box\Eberlin_Lab_BCM\Projects\Bacterial Identification\data\culture_isolates\MSPen\negative_ion_mode\solvent_MeOH)")
+sample_dir <- gsub("\\\\", "/", r"(C:\Users\Jacob\Box\Eberlin_Lab_BCM\People\MANOJ\Renamed_Gram_positive_Gram_negative_Isolates_May2025\Excel files)")
 
 ## Full path to feature list, otherwise NULL
-feature_file <- gsub("\\\\", "/", r"(C:\Users\Jacob\Box\Eberlin_Lab_BCM\People\MANOJ\Manuscript\PNAS_APR_2025\lipid Ratio mz.xlsx)")
+feature_file <- gsub("\\\\", "/", r"(C:\Users\Jacob\Box\Eberlin_Lab_BCM\People\MANOJ\Renamed_Gram_positive_Gram_negative_Isolates_May2025\molecular Identity with Chemical  Formula\Microbes_Identified_features_May_2025.xlsx)")
 
 ## Full path to background peak list, otherwise NULL
 background_file <- NULL
@@ -307,7 +307,7 @@ if (peak_alignment_method == "featurelist") {
     feature_df <- read_excel(feature_file, col_names = TRUE)
     ## TODO: What if CSV file?
     
-    feature_peaks <- unlist(feature_df[,1])
+    feature_peaks <- unlist(feature_df[,2])
     
     ## Feature mz plus/minus instrument mass error, round to 3 decimal places
     mass_error <- unlist((ppm_error * feature_peaks)/1e6)
