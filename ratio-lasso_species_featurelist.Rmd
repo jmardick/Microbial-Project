@@ -1,5 +1,5 @@
 ---
-title: "Ratio Lasso - Gram Stain Prediction"
+title: "Ratio Lasso - Species Prediction"
 subtitle: "Renamed Sample Files"
 author: "Jacob Mardick"
 date: "`r format(Sys.time(), '%B %d, %Y %H:%M')`"
@@ -75,13 +75,13 @@ library(scales) ## for integer y-axis on histogram
 ```{r user input}
 ## Full path to folder with sample files (excel or csv, or raw Thermo files)
 ## PASTE PATH IN BETWEEN INNER PARENTHASIS WITH QUOTES ON THE OUTSIDE -- NO NEED TO CHANGE BACKSLASHES TO FORWARD SLASHES
-sample_dir <- gsub("\\\\", "/", r"(C:\Users\Jacob\Box\Eberlin_Lab_BCM\People\MANOJ\Renamed_Gram_positive_Gram_negative_Isolates_May2025\Excel files)")
+sample_dir <- gsub("\\\\", "/", r"(C:\Users\Jacob\Box\Eberlin_Lab_BCM\People\MANOJ\Renamed_Gram_positive_Gram_negative_Isolates_May2025\Species_Excel)")
 
 ## Full path to feature list, otherwise NULL
 feature_file <- gsub("\\\\", "/", r"(C:\Users\Jacob\Box\Eberlin_Lab_BCM\People\MANOJ\Renamed_Gram_positive_Gram_negative_Isolates_May2025\molecular Identity with Chemical  Formula\Microbes_Identified_features_May_2025.xlsx)")
 
 ## Full path to background peak list, otherwise NULL
-background_file <- NULL
+background_file <- NA
 
 ## ---------------------------------------------------------------------------
 
@@ -128,7 +128,20 @@ if(!file.exists(files_dir)) {
 
 ```{r file extension}
 ## 
-classes <- c("gram_negative", "gram_positive")
+classes_path <- gsub(file.path(sample_dir, "/"), "", list.dirs(sample_dir)[c(-1)], fixed=TRUE)
+
+classes <- strsplit(classes_path, "/")
+classes <- classes[lapply(classes,length)==2]
+
+classes_path <- lapply(classes, function(x) paste(x, collapse = '/'))
+
+classes <- sapply(classes, `[`, 2)
+classes <- unique(classes)
+classes <- classes[!is.na(classes)]
+classes <- gsub("(_|\\s)?[Rr]enamed.*|(_|\\s)?[Ee]xcel.*", "", classes)
+classes <- trimws(classes)
+
+names(classes_path) <- classes
 
 ## check file extension
 sample_file_ext <- "xlsx"
@@ -136,18 +149,24 @@ sample_file_ext <- "xlsx"
 
 ```{r file and sample names}
 ## file names
-file_name_list <- lapply(classes, function(x) 
-  list.files(path = file.path(sample_dir,x), pattern = paste0("*.", sample_file_ext), full.names = TRUE, recursive = TRUE))
+file_name_list <- lapply(classes_path, function(x) 
+  list.files(path = file.path(sample_dir,x), pattern = paste0("*.", sample_file_ext), full.names = TRUE, 
+             #recursive = FALSE))
+             recursive = TRUE)) ## If files are in sub-directories within class directories
 
 ## Ensure patient ordering is consistent across different OSes.
 file_name_list <- lapply(file_name_list, sort)
 
+## remove classes with <10 samples
+file_name_list <- file_name_list[lengths(file_name_list) >= 10]
+
 ## sample names
 sample_names_list <- lapply(file_name_list, function(x) tools::file_path_sans_ext(basename(x)))
-names(sample_names_list) <- classes
 sample_names <- unlist(sample_names_list)
 sample_names_df <- purrr::map_df(sample_names_list, ~as.data.frame(.x), .id="id")
 colnames(sample_names_df) <- c("class", "sample_name")
+
+classes <- names(file_name_list)
 ```
 
 ```{r}
@@ -396,11 +415,7 @@ xall <- normalize_pixel(aligned_spectra, normalization_method)
 
 ```{r yall}
 ## create yall object 
-yall <- foreach(i = 1:length(file_name_list), .combine = c) %do% {
-  rep(i, length(file_name_list[[i]])) }
-
-## factorize yall
-yall <- factor(yall,levels=c("1","2"),labels = classes)
+yall <- factor(sample_names_df$class,levels=c(classes),labels = classes)
 ```
 
 ## Create data for training
@@ -433,6 +448,7 @@ otr <- train_partition$Resample2
 compute_logratios_with_bounds <- function(x, feature_names = NULL, min_valid = 10) {
   n_features <- ncol(x)
   n_samples <- nrow(x)
+  combs <- 
   n_ratios <- choose(n_features, 2)
   
   ## Initialize
@@ -458,8 +474,7 @@ compute_logratios_with_bounds <- function(x, feature_names = NULL, min_valid = 1
         q99 <- quantile(valid_vals, 0.99)
         
       } else {
-        q01 <- quantile(ratio, 0.01, na.rm = TRUE)
-        q99 <- quantile(ratio, 0.99, na.rm = TRUE)
+        NA
       }
       
       ## Restore directionality of -Inf and +Inf
@@ -492,6 +507,7 @@ nams.p <- nams.p[na_free_cols]
 
 ## Keeping naming scheme the same
 xtrain <- allpairs[otr,]
+xtrain <- as(xtrain, "dgCMatrix")
 xtest <- allpairs[-otr,]
 ytrain <- yall[otr]
 ytest <- yall[-otr]
@@ -499,12 +515,15 @@ ytest <- yall[-otr]
 model <- glmnet(
   xtrain, 
   ytrain, 
-  family = "binomial", ## for logit (logarithm of the odds) or logistic regression
+  family = "multinomial", ## for logit (logarithm of the odds) or logistic regression
+  type.multinomial = "ungrouped",
+  alpha = 1,
   standardize = FALSE, ## because intensities are already in same units
   lambda.min.ratio = 1e-05 ) ## The model will compute its own lambda sequence based on nlambda and lambda.min.ratio 
 
-nfolds <- nrow(xtrain)
-cvmodel <- cv.glmnet(xtrain, ytrain, nfolds = nfolds, family = "binom", type.measure = "class", standardize = F, keep = T)
+#nfolds <- nrow(xtrain)
+nfolds <- 10
+cvmodel <- cv.glmnet(xtrain, ytrain, nfolds = nfolds, family = "multinomial", type.measure = "class", standardize = F, keep = T, lambda.min.ratio = 1e-05, type.multinomial = "ungrouped")
 ```
 
 ```{r ROC Metrics}
@@ -512,50 +531,16 @@ cvmodel <- cv.glmnet(xtrain, ytrain, nfolds = nfolds, family = "binom", type.mea
 min_lambda_index <- which(cvmodel$lambda == cvmodel$lambda.min)
 
 ## 1/(1+e^(-preval)) is the inverse of the link function?
-cv_predictions <- 1/(1+exp(-cvmodel$fit.preval[,min_lambda_index]))
-
-## build ROC for training data using minLamIdx
-roc_curve <- roc(
-  ytrain, 
-  cv_predictions )
-
-## create dataframe from ROC object to create plot for trade off
-## of accuracy, sensitivity, and specificity
-roc_df <- data.frame(
-  cutoff = roc_curve$thresholds, 
-  sensitivity = roc_curve$sensitivities, 
-  specificity = roc_curve$specificities )
-
-roc_df$accuracy <- (roc_df$sensitivity*length(roc_curve$cases) + 
-                      roc_df$specificity*length(roc_curve$controls)) / (length(roc_curve$cases) + 
-                                                                          length(roc_curve$controls) )
-
-## plot trade off of accuracy, sensitivity, and specificity
-roc_metrics <- ggplot(roc_df) + geom_line(aes(cutoff, sensitivity, col = "Sensitivity")) + 
-  geom_line(aes(cutoff, specificity, col = "Specificity")) + 
-  geom_line(aes(cutoff, accuracy, col = "Accuracy")) +
-  labs(x = "cutoff", y = "%", color="") +
-  ggtitle("Trade off of performance metrics for determining threshold cutoff value")
-```
-
-```{r Threshold Coordinates}
-## Identify Threshold Coordinates where Accuracy, Sensitivity, and Specificity Cross
-## Set threshold for labeling classes --> balance of true positive and false positive rates.
-best_threshold <- as.double(coords(roc_curve, 
-                                   "best", ## coordinates for best threshold value
-                                   ret = "threshold", ## coordinates to return
-                                   best.method = "youden" )[1,1]) ## optimal cut-off is the threshold that maximizes the distance to the identity (diagonal) line
+cv_predictions <- 1/(1+exp(-cvmodel$fit.preval[, , min_lambda_index]))
 ```
 
 ```{r CV Confusion Matrix}
 ## predict classes based on threshold
-cv_p_thresh <- ifelse(cv_predictions < best_threshold, classes[1], classes[2])
+cv_p_class <- apply(cv_predictions, 1, which.max)
 
-cv_p_class <- factor(cv_p_thresh, levels(ytrain))
+cv_p_class <- factor(cv_p_class,levels=as.character(1:length(classes)),labels = classes)
 
-## simple confusion matrix table
-cv_cm <- table(True=ytrain,
-               Predict=cv_p_class)
+cv_cm <- table(True=ytrain, Predict=cv_p_class)
 ```
 
 ```{r Training Histogram}
@@ -583,10 +568,10 @@ test_p <- predict(model,
 ```
 
 ```{r Testing Confusion Matrix}
-test_p_thresh <- ifelse(test_p < best_threshold, classes[1], classes[2]) 
-test_p_class <- factor(test_p_thresh, levels(ytest))
+test_p_class <- apply(test_p, 1, which.max)
 
-## simple confusion matrix table
+test_p_class <- factor(test_p_class,levels=as.character(1:length(classes)),labels = classes)
+
 test_cm <- table(True=ytest,
                  Predict=test_p_class)
 ```
@@ -595,7 +580,7 @@ test_cm <- table(True=ytest,
 test_df <- data.frame(file_name=sample_names[-c(otr)], 
                       true_class=ytest, 
                       prediction_class=test_p_class, 
-                      probability=as.numeric(test_p))
+                      probability=as.data.frame(test_p))
 
 rownames(test_df) <- NULL
 
@@ -604,7 +589,7 @@ test_wrong_preds <- test_df %>%
 ```
 
 ```{r save model, include=FALSE}
-save(model, cvmodel, filtered_mz, best_threshold,mass_range, ppm_error, normalization_method, seed, classes, lasso_coef, peak_alignment_method,
+save(model, cvmodel, filtered_mz, mass_range, ppm_error, normalization_method, seed, classes, classes_path, lasso_coef, peak_alignment_method,
      file=file.path(files_dir, paste0(format(Sys.time(), "%Y-%m-%d_%H.%M"),"_",proj_name, "_model.RData")))
 ```
 
@@ -646,19 +631,8 @@ write.csv(test_wrong_preds,
 ```{r save plots, include=FALSE}
 png(filename=file.path(files_dir, "cv_plot.png"))
 plot(cvmodel)
-title("cross-validation curve : binomial family", line = 2.5)
+title("cross-validation curve", line = 2.5)
 dev.off()
-
-png(filename=file.path(files_dir, "roc_plot.png"))
-plot(roc_curve, 
-     print.thres="best", 
-     print.thres.best.method="youden",
-     print.auc=TRUE, 
-     auc.polygon=TRUE,
-     main = "ROC Curve")
-dev.off()
-
-ggsave(roc_metrics, filename = file.path(files_dir, "roc_metrics_thresh.png"))
 ```
 
 <br>
@@ -674,88 +648,101 @@ if (peak_alignment_method == "clustering") {
   cluster_bin_size <- c("Peak Mass Error:", paste0(ppm_error, " ppm"))
 }
 
-if (is.null(background_file)) {
+if (is.na(background_file)) {
   bg_exclusion <- "no"
-} else if (!is.null(background_file)) {
+} else if (!is.na(background_file)) {
   bg_exclusion <- "yes"
 }
 
-settings_df <- rbind(c("Mass Range:", paste0('<i>m/z</i> ', mass_range[1], " - ", mass_range[2])),
-                     c("Peak Alignment Method:", peak_alignment_method),
-                     cluster_bin_size,
-                     c("Background Peak Exclusion:", bg_exclusion),
-                     c("Normalization Method:", normalization_method),
-                     c("Train/Test Split:", paste0((train_fraction*100),"/",(100-(train_fraction*100)))),
-                     c("Randomization Seed:", seed))
+# if (is.na(SNR_thresh)) {
+#   SNR_thresh <- "No noise information provided"
+# } else if (!is.na(SNR_thresh)) {
+#   SNR_threshold <- SNR_thresh
+# }
 
-classes2 <- tools::toTitleCase(gsub("_", " ", classes))
+settings_df <- rbind(#c("SNR Threshold:", SNR_thresh),
+  c("Mass Range:", paste0('<i>m/z</i> ', mass_range[1], " - ", mass_range[2])),
+  c("Peak Alignment Method:", peak_alignment_method),
+  cluster_bin_size,
+  c("Background Peak Exclusion:", bg_exclusion),
+  c("Normalization Method:", normalization_method),
+  c("Randomization Seed:", seed),
+  c("Train/Test Split:", paste0((train_fraction*100),"/",(100-(train_fraction*100)))),
+  c("Elastic Net Alpha:", "1 (LASSO)"))
+
+species <- gsub("_", " ", classes)
 
 kable(settings_df,
-      #caption = "Preprocessing and LASSO Settings",
       row.names = FALSE,
       align = "l",
       format = "html",
       escape = FALSE)%>%
   column_spec(1:2, width = "3in")%>% 
-  kable_styling(full_width = FALSE, 
-                font_size = 14)
+  kable_styling(full_width = F)
 
 cols <- rev(c(hue_pal()(2)))
 ```
 
 ```{r chunk4}
-cv_cm <- as.data.frame.matrix(cv_cm)
-test_cm <- as.data.frame.matrix(test_cm)
+cv_recalls <- paste0(format(round(sapply(1:length(classes), function(x) cv_cm[x,x]/sum(cv_cm[x,])*100),2), nsmall = 2), "%")
+cv_counts <- sapply(1:length(classes), function(x) paste0(cv_cm[x,x],"/",sum(cv_cm[x,])))
+cv_accuracy <- cbind(paste0(species, ":"), cv_recalls, cv_counts)
 
-cv_cm <- cbind(c("True", "True"),
-               classes2,
-               cv_cm)
+cv_accuracy <- rbind(cv_accuracy, 
+                     c("Overall Accuracy:", 
+                       paste0(format(round(sum(diag(cv_cm))/sum(cv_cm)*100,2), nsmall = 2), "%"),
+                       paste0(sum(diag(cv_cm)),"/",sum(cv_cm))))
 
-test_cm <- cbind(c("True", "True"),
-                 classes2,
-                 test_cm)
+colnames(cv_accuracy) <- c("Species", "Recall Rate", "Correct Prediction/True Count")
 
-rownames(cv_cm) <- NULL
-rownames(test_cm) <- NULL
 
-colnames(cv_cm) <- c(".", "  ", classes2)
-colnames(test_cm) <- c(".", "  ", classes2)
+test_recalls <- paste0(format(round(sapply(1:length(classes), function(x) test_cm[x,x]/sum(test_cm[x,])*100),2), nsmall = 2), "%")
+test_counts <- sapply(1:length(classes), function(x) paste0(test_cm[x,x],"/",sum(test_cm[x,])))
 
-names(cv_cm)[1] <- cell_spec(names(cv_cm)[1], color = "white")
-names(test_cm)[1] <- cell_spec(names(test_cm)[1], color = "white")
+test_accuracy <- cbind(paste0(species, ":"), test_recalls,test_counts)
 
-cv_accuracy <- rbind(c(paste0(classes2[1], " Recall: "), 
-                       paste0(format(round((cv_cm[1,3]/rowSums(cv_cm[,3:4])[1])*100, 1), nsmall = 1), "%")),
-                     c(paste0(classes2[2], " Recall: "), 
-                       paste0(format(round((cv_cm[2,4]/rowSums(cv_cm[,3:4])[2])*100,1), nsmall = 1), "%")),
-                     c("Overall Accuracy: ", 
-                       paste0(format(round(((cv_cm[1,3] + cv_cm[2,4])/sum(cv_cm[, 3:4]))*100, 1), nsmall = 1), "%")))
+test_accuracy <- rbind(test_accuracy, 
+                       c("Overall Accuracy:", 
+                         paste0(format(round(sum(diag(test_cm))/sum(test_cm)*100,2), nsmall = 2), "%"),
+                         paste0(sum(diag(test_cm)),"/",sum(test_cm))))
+colnames(test_accuracy) <- c("Species", "Recall Rate", "Correct Prediction/True Count")
+```
 
-test_accuracy <- rbind(c(paste0(classes2[1], " Recall: "), 
-                         paste0(format(round((test_cm[1,3]/rowSums(test_cm[,3:4])[1])*100, 1), nsmall = 1), "%")),
-                       c(paste0(classes2[2], " Recall: "), 
-                         paste0(format(round((test_cm[2,4]/rowSums(test_cm[,3:4])[2])*100,1), nsmall = 1), "%")),
-                       c("Overall Accuracy: ", 
-                         paste0(format(round(((test_cm[1,3] + test_cm[2,4])/sum(test_cm[, 3:4]))*100, 1), nsmall = 1), "%")))
+```{r chunk5}
+coef2 <- format(round(lasso_coef,3), nsmall = 3)[ , 1:(ncol(lasso_coef)-2)]
+coef2_feature_names <- rownames(coef2)
+coef2_feature_names[1] <- "Intercept"
+coef2 <- data.frame(Features = coef2_feature_names, coef2, row.names = NULL, check.names = FALSE)
 ```
 
 <br>
 
 #### **Training Set Confusion Matrix**
 
-```{r chunk6, fig.align = "center"}
-kable(cv_cm,
-      #caption = "Training Set",
-      align = "c",
-      format = "html",
-      escape = FALSE) %>%
-  kable_styling(full_width = FALSE) %>%
-  add_header_above(c("", " ", "Predict" = 2)) %>%
-  column_spec(1, bold = TRUE) %>%
-  column_spec(2, bold = TRUE) %>%
-  collapse_rows(columns = 1) %>% 
-  column_spec(3, background = "#c3fcb5")
+```{r fig.height=6, fig.width=6, message = FALSE, fig.align = "center"}
+cv_cm_df <- as.data.frame(cv_cm)
+cv_cm_plot_df <- cv_cm_df %>%
+  mutate(plot.fill = case_when(
+    True == Predict ~ "TP",
+    True != Predict & Freq > 0 ~ "FP",
+    True != Predict & Freq == 0 ~ "TN"))
 
+ggplot(cv_cm_plot_df, aes(Predict, True, label = Freq, fill = plot.fill)) + 
+  geom_tile(color = "black") +
+  geom_text() +
+  scale_fill_manual(values = c("#f2e3c7", "white", "#c3fcb5"))+
+  scale_x_discrete(position = "top") +
+  scale_y_discrete(limits = rev) +
+  theme(axis.text.x = element_text(angle = 90, hjust = 0, vjust = 0), 
+        plot.title.position = "plot",
+        legend.position = "none",
+        panel.grid = element_blank()) +
+  #labs(title = "Training Set") +
+  scale_y_discrete(labels=rev(species), limits=rev) +
+  scale_x_discrete(labels=species, position = "top")
+```
+
+```{r, fig.align = "center"}
 kable(cv_accuracy,
       row.names = FALSE,
       align = "r") %>% 
@@ -769,20 +756,30 @@ kable(cv_accuracy,
 <br>
 
 #### **Test Set Confusion Matrix**
+```{r fig.height=6, fig.width=6, message = FALSE, fig.align = "center"}
+test_cm_df <- as.data.frame(test_cm)
+test_cm_plot_df <- test_cm_df %>%
+  mutate(plot.fill = case_when(
+    True == Predict ~ "TP",
+    True != Predict & Freq > 0 ~ "FP",
+    True != Predict & Freq == 0 ~ "TN"))
 
-```{r chunk7, fig.align = "center"}
-kable(test_cm,
-      #caption = "Test Set", 
-      align = "c",
-      format = "html",
-      escape = FALSE) %>%
-  kable_styling(full_width = FALSE) %>%
-  add_header_above(c("", " ", "Predict" = 2)) %>%
-  column_spec(1, bold = TRUE) %>%
-  column_spec(2, bold = TRUE) %>%
-  collapse_rows(columns = 1) %>%
-  column_spec(3, background = "#c3fcb5")
+ggplot(test_cm_plot_df, aes(Predict, True, label = Freq, fill = plot.fill)) + 
+  geom_tile(color = "black") +
+  geom_text() +
+  scale_fill_manual(values = c("#f2e3c7", "white", "#c3fcb5"))+
+  scale_x_discrete(position = "top") +
+  scale_y_discrete(limits = rev) +
+  theme(axis.text.x = element_text(angle = 90, hjust = 0, vjust = 0), 
+        plot.title.position = "plot",
+        legend.position = "none",
+        panel.grid = element_blank()) +
+  #labs(title = "Test Set") +
+  scale_y_discrete(labels=rev(species), limits=rev) +
+  scale_x_discrete(labels=species, position = "top")
+```
 
+```{r, fig.align = "center"}
 kable(test_accuracy,
       row.names = FALSE,
       align = "r") %>% 
@@ -795,140 +792,31 @@ kable(test_accuracy,
 
 <br>
 
-```{r roc curve report, fig.align='center', fig.width=4, fig.height=4}
-plot(roc_curve, 
-     print.thres="best", 
-     print.thres.best.method="youden",
-     print.auc=TRUE, 
-     auc.polygon=TRUE,
-     main = "ROC")
+#### **Model Predictive Feature Weights**
+Positive value  indicates that the feature is predictive for that species, negative value indicates that the feature is predictive for the opposite class (not that species).
+
+```{r, fig.align = "center"}
+coef2 %>%
+  kable(
+    #caption = "LASSO Model Predictive Feature Weights",
+    row.names = FALSE,
+    align = "c") %>% 
+  kable_styling(full_width = FALSE, bootstrap_options = c("striped", "condensed"), font_size = 12) %>%
+  column_spec(1:ncol(coef2),width = "2in")
 ```
 
 <br>
 
-#### **LASSO Model Predictive Feature Weights**
-
-```{r chunk5}
-if(normalization_method == "median"){
-  lasso_coef2 <- data.frame(cbind(c("Intercept",
-                                    format(rownames(lasso_coef[2:nrow(lasso_coef),]), nsmall = 3)),
-                                  as.numeric(lasso_coef[, 1])))
-}else {
-  lasso_coef2 <- data.frame(cbind(c("Intercept", 
-                                    format(rownames(lasso_coef[2:nrow(lasso_coef),]), nsmall = 3)), 
-                                  format(round(as.numeric(lasso_coef[, 1]),3), nsmall = 3)))
-}
-
-colnames(lasso_coef2) <- c("Features", paste0("Weights (", classes2[2], ")"))
-```
-
-```{r}
-## remove intercept row
-intercept <- lasso_coef2[1, 2]
-
-## split features into positive and negative
-pos_features <- lasso_coef2[which(as.numeric(lasso_coef2[[2]]) > 0), ]
-neg_features <- lasso_coef2[which(as.numeric(lasso_coef2[[2]]) < 0), ]
-
-pos_features <- subset(pos_features, Features != "Intercept")
-neg_features <- subset(neg_features, Features != "Intercept")
-
-max_len <- max(nrow(pos_features), nrow(neg_features))
-
-pos_features <- pos_features[c(NA, seq_len(nrow(pos_features)), rep(NA, max_len - nrow(pos_features))), ]
-neg_features <- neg_features[c(NA, seq_len(nrow(neg_features)), rep(NA, max_len - nrow(neg_features))), ]
-empty_col <- c(intercept, rep(NA, max_len))
-
-split_lasso_coefs <- cbind(pos_features, empty_col, neg_features)
-
-split_lasso_coefs[is.na(split_lasso_coefs)] <- ""
-
-colnames(split_lasso_coefs) <- c(paste0(classes2[2], " Features"), 
-                                 paste0(classes2[2], " Weights"), 
-                                 "Intercept", 
-                                 paste0(classes2[1], " Features"), 
-                                 paste0(classes2[1], " Weights"))
-```
-
-```{r, fig.align = "center", eval = FALSE, include = FALSE}
-lasso_coef2 %>%
-  kable(
-    #caption = "LASSO Model Predictive Feature Weights",
-    row.names = FALSE,
-    align = "c") %>% 
-  kable_styling(full_width = FALSE, 
-                font_size = 14) %>%
-  column_spec(1:2,width = "2in")
-```
-
-```{r, fig.align = "center"}
-split_lasso_coefs %>%
-  kable(
-    #caption = "LASSO Model Predictive Feature Weights",
-    row.names = FALSE,
-    align = "c") %>% 
-  kable_styling(full_width = FALSE, 
-                font_size = 14) %>%
-  column_spec(1:5,width = "2in")
-```
-
-```{r chunk9, fig.width=8, fig.height=3, fig.align = "center"}
-train_plot <- ggplot(train_df, aes(x=probability, fill=true_class, color=true_class)) + 
-  geom_histogram(binwidth=0.01, alpha=0.25, position="identity",boundary=0) + 
-  ggtitle("Prediction Probabilities: Training Set") +
-  geom_vline(xintercept = best_threshold, linewidth = 0.75,  color = "black", linetype = "dashed") +
-  scale_x_continuous(breaks = seq(0, 1, by = 0.1), minor_breaks = seq(0, 1, by = 0.05), expand = c(0.05,0)) +
-  #scale_y_continuous(breaks = seq(0, nrow(train_df), by = 5), minor_breaks = seq(0, nrow(train_df), by = 1), expand = c(0.01,0)) +
-  scale_color_manual(values = rev(cols), labels = c(classes2[1], classes2[2])) +
-  scale_fill_manual(values = rev(cols), labels = c(classes2[1], classes2[2])) +
-  labs(x = "Prediction Probability", y = "Spectra Count", color="True Class", fill = "True Class") +
-  #theme_minimal(base_size = 9)
-  theme_minimal() +
-  theme(legend.position = "bottom")
-
-test_plot <- ggplot(test_df, aes(x=probability, fill=true_class, color=true_class)) + 
-  geom_histogram(binwidth=0.01, alpha=0.25, position="identity",boundary=0) + 
-  ggtitle("Prediction Probabilities: Test Set") +
-  geom_vline(xintercept = best_threshold, linewidth = 0.75,  color = "black", linetype = "dashed") +
-  scale_x_continuous(breaks = seq(0, 1, by = 0.1), minor_breaks = seq(0, 1, by = 0.05), expand = c(0.05,0)) +
-  #scale_y_continuous(breaks = seq(0, nrow(test_df), by = 5), minor_breaks = seq(0, nrow(test_df), by = 1), expand = c(0.01,0)) +
-  scale_color_manual(values = rev(cols), labels = c(classes2[1], classes2[2])) +
-  scale_fill_manual(values = rev(cols), labels = c(classes2[1], classes2[2])) +
-  labs(x = "Prediction Probability", y = "Spectra Count", color="True Class", fill = "True Class") +
-  #theme_minimal(base_size = 9)
-  theme_minimal() +
-  theme(legend.position = "bottom")
-
-#ggarrange(train_plot, test_plot, common.legend = TRUE,legend = "bottom")
-```
-
-```{r}
-ggsave(plot=train_plot, filename = file.path(files_dir, "train_histogram.png"), bg = "white")
-ggsave(plot=test_plot, filename = file.path(files_dir, "test_histogram.png"), bg = "white")
-```
-
 ```{r chunk10}
 ## Add misclassified training samples
-train_wrong_preds <- train_df %>%
-  filter(true_class != prediction_class)
-
-train_wrong_preds <- train_wrong_preds[order(train_wrong_preds$true_class), ]
-
-train_wrong_preds$true_class <- gsub(classes[1], classes2[1], gsub(classes[2], classes2[2],train_wrong_preds$true_class))
-train_wrong_preds$prediction_class <- gsub(classes[1], classes2[1], gsub(classes[2], classes2[2],train_wrong_preds$prediction_class))
-
-train_wrong_preds$probability <- round(train_wrong_preds$probability, 3)
+train_wrong_preds$true_class <- gsub("_", " ", train_wrong_preds$true_class)
+train_wrong_preds$prediction_class <- gsub("_", " ", train_wrong_preds$prediction_class)
+train_wrong_preds[, 4:ncol(train_wrong_preds)] <- round(train_wrong_preds[, 4:ncol(train_wrong_preds)], 3)
 
 ## Add misclassified test samples
-test_wrong_preds <- test_df %>%
-  filter(true_class != prediction_class)
-
-test_wrong_preds <- test_wrong_preds[order(test_wrong_preds$true_class), ]
-
-test_wrong_preds$true_class <- gsub(classes[1], classes2[1], gsub(classes[2], classes2[2],test_wrong_preds$true_class))
-test_wrong_preds$prediction_class <- gsub(classes[1], classes2[1], gsub(classes[2], classes2[2],test_wrong_preds$prediction_class))
-
-test_wrong_preds$probability <- round(test_wrong_preds$probability, 3)
+test_wrong_preds$true_class <- gsub("_", " ", test_wrong_preds$true_class)
+test_wrong_preds$prediction_class <- gsub("_", " ", test_wrong_preds$prediction_class)
+test_wrong_preds[, 4:ncol(test_wrong_preds)] <- round(test_wrong_preds[, 4:ncol(test_wrong_preds)], 3)
 ```
 
 <br>
@@ -936,17 +824,19 @@ test_wrong_preds$probability <- round(test_wrong_preds$probability, 3)
 #### **Training Set Misclassifications**
 
 ```{r chunk11, fig.align = "center"}
-train_plot
+align <- paste0("lll",paste0(rep("c", ncol(train_wrong_preds)-3), collapse =""))
 
 kable(train_wrong_preds,
       #caption = "Training Set Misclassifications",
-      col.names = c("Sample Name", "True Class", "Predicted Class", "Probability"),
+      col.names = c("Sample Name", "True Class", "Predicted Class", species),
       row.names = FALSE,
-      align = "l")  %>%
-  kable_styling(position = "center", 
-                bootstrap_options = c("striped", "condensed"),
-                full_width = FALSE, 
-                font_size = 14)
+      align = align) %>%
+  kable_styling(full_width = FALSE, 
+                position = "center", 
+                bootstrap_options = c("striped", "condensed"), 
+                font_size = 12) %>%
+  column_spec(1:3, width_min = "2in", width_max = "5in")  %>%
+  add_header_above(c(" " = 3, "Probability" = ncol(train_wrong_preds)-3))
 ```
 
 <br>
@@ -954,17 +844,16 @@ kable(train_wrong_preds,
 #### **Test Set Misclassifications**
 
 ```{r chunk12, fig.align = "center"}
-test_plot
-
 kable(test_wrong_preds,
-      #caption = "Test Set Misclassifications",
-      col.names = c("Sample Name", "True Class", "Predicted Class", "Probability"),
+      col.names = c("Sample Name", "True Class", "Predicted Class", species),
       row.names = FALSE,
-      align = "l")  %>%
-  kable_styling(position = "center", 
-                bootstrap_options = c("striped", "condensed"),
-                full_width = FALSE, 
-                font_size = 14)
+      align = align)  %>%
+  kable_styling(full_width = FALSE, 
+                position = "center", 
+                bootstrap_options = c("striped", "condensed"), 
+                font_size = 12) %>%
+  column_spec(1:3, width_min = "2in", width_max = "5in")  %>%
+  add_header_above(c(" " = 3, "Probability" = ncol(test_wrong_preds)-3))
 ```
 
 <br>
@@ -972,8 +861,11 @@ kable(test_wrong_preds,
 #### **Train/Test Data Split**
 
 ```{r chunk13}
-## Add list of samples for training and testing
+## Add list of samples for training
+## Add list of samples for testing
+
 train_samples <- sort(train_df$file_name)
+
 test_samples <- sort(test_df$file_name)
 
 n <- max(length(train_samples), length(test_samples))
@@ -995,136 +887,4 @@ kable(samples,
                 bootstrap_options = "condensed",
                 html_font = "Calibri",
                 font_size = 12)
-```
-
-```{r pca}
-# Run PCA
-allpairs_filtered <- allpairs[, apply(allpairs, 2, function(col) sd(col) != 0)]
-pca <- prcomp(allpairs_filtered, center = TRUE, scale. = TRUE)
-
-# Calculate variance explained
-var_explained <- (pca$sdev)^2 / sum(pca$sdev^2)
-pc_labels <- paste0("PC", 1:2, " (", round(var_explained[1:2] * 100, 1), "%)")
-
-# Create PCA data frame
-pca_df <- data.frame(PC1 = pca$x[, 1],
-                     PC2 = pca$x[, 2],
-                     class = yall)
-
-
-plot4 <- ggplot(pca_df, aes(x = PC1, y = PC2, color = class)) +
-  geom_point(alpha = 0.5, size = 1.2) +
-  labs(
-    title = "PCA of All Log-Ratio Features by Class", 
-    x = paste0("PC1 (", round(summary(pca)$importance[2, 1] * 100, 1), "%)"),
-    y = paste0("PC2 (", round(summary(pca)$importance[2, 2] * 100, 1), "%)"),
-    color = "Class"
-  ) +
-  theme_minimal() +
-  theme(legend.position = "right",
-        plot.title = element_text(size = 22, hjust = 0.5),
-        axis.title.x = element_text(size = 16),
-        axis.title.y = element_text(size = 16),
-        legend.title = element_text(size = 16),
-        legend.text = element_text(size = 14)
-        ) +
-  guides(color = guide_legend(override.aes = list(size = 4)))
-
-ggsave(plot4, 
-       width = 8,        # wider than default
-       height = 8,        # adjust as needed for aspect ratio
-       units = "in",      # specify inches
-       dpi = 300,  
-       file = file.path(files_dir, paste0("pure-isolates_pca_class.png"))
-       )
-
-# Variance explained
-var_explained <- pca$sdev^2 / sum(pca$sdev^2)
-
-# Create a data frame for plotting
-elbow_df <- data.frame(
-  PC = paste0("PC", 1:length(var_explained)),
-  Variance = var_explained
-)
-
-# Plot
-plot5 <- ggplot(elbow_df[1:36, ], aes(x = seq_along(Variance), y = Variance)) +
-  geom_line() +
-  geom_point() +
-  # scale_x_continuous(breaks = 1:20) +
-  labs(title = "Log-Ratio Feature PCA Scree Plot",
-       x = "Principal Component",
-       y = "Proportion of Variance Explained") +
-  theme_minimal() +
-  theme(plot.title = element_text(size = 22, hjust = 0.5),
-        axis.title.x = element_text(size = 16),
-        axis.title.y = element_text(size = 16),
-        axis.text.x = element_text(size = 14),
-        axis.text.y = element_text(size = 14)
-        )
-
-ggsave(plot5, 
-       width = 4.67,        # wider than default
-       height = 7,        # adjust as needed for aspect ratio
-       units = "in",      # specify inches
-       dpi = 300,  
-       file = file.path(files_dir, paste0("pure-isolates_scree-plot.png"))
-       )
-```
-
-```{r tsne}
-library(Rtsne)
-
-# Use top 10 PCs (adjust based on the elbow)
-pca_input <- pca$x[, 1:10]
-dupe_idx <- !duplicated(pca_input)  # TRUE for rows kept
-# Remove duplicate rows
-pca_input_unique <- pca_input[dupe_idx, ]
-
-# Store mapping to original rows if you need to join later
-pca_input_idx <- match(data.frame(t(pca_input_unique)) |> as.list(), 
-                       data.frame(t(pca_input)) |> as.list())
-
-# Run t-SNE on unique inputs
-set.seed(42)
-tsne_result <- Rtsne(pca_input_unique, dims = 2, perplexity = 50, max_iter = 1000, verbose = TRUE)
-
-# Now map the t-SNE result back
-tsne_coords <- matrix(NA, nrow = nrow(pca_input), ncol = 2)
-tsne_coords[dupe_idx, ] <- tsne_result$Y  # fill only the non-duplicated rows
-
-# Make data.frame for plotting
-tsne_df <- data.frame(
-  X = tsne_coords[, 1],
-  Y = tsne_coords[, 2],
-  class = yall
-)
-
-tsne_df_clean <- tsne_df[complete.cases(tsne_df[, c("X", "Y")]), ]
-
-plot6 <- ggplot(tsne_df_clean, aes(x = X, y = Y, color = class)) +
-  geom_point(alpha = 0.5, size = 1.2) +
-  theme_minimal() +
-  labs(title = "t-SNE of Top 10 Log-Ratio PCs", color = "Class") +
-  guides(
-    color = guide_legend(override.aes = list(size = 3)),   # increase color dot size
-  ) +
-  theme(
-    axis.title = element_blank(),
-    axis.text = element_blank(),
-    axis.ticks = element_blank(),
-    panel.grid = element_blank(),
-    legend.title = element_text(size = 16),
-    legend.text = element_text(size = 14),
-    legend.position = "right",
-    plot.title = element_text(hjust = 0.5, size = 18)
-  )
-plot6
-ggsave(plot6, 
-       width = 4.67,        # wider than default
-       height = 7,        # adjust as needed for aspect ratio
-       units = "in",      # specify inches
-       dpi = 300,  
-       file = file.path(files_dir, paste0("pure-isolates_tsne_class.png"))
-       )
 ```
