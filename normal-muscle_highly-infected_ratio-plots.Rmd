@@ -64,20 +64,13 @@ library(johnfuncs)
 
 ```{r user input}
 ## Full path to folder with sample files (excel or csv, or raw Thermo files)
-## PASTE PATH IN BETWEEN INNER PARENTHASIS WITH QUOTES ON THE OUTSIDE -- NO NEED TO CHANGE BACKSLASHES TO FORWARD SLASHES
-#sample_dir <- gsub("\\\\", "/", r"(C:\Users\fjackobs\Desktop\MSPen_script_test_data\csv)")
-#sample_dir <- gsub("\\\\", "/", r"(C:\Users\fjackobs\Desktop\MSPen_script_test_data\xlsx)")
-sample_dir <- gsub("\\\\", "/", r"(C:\Users\fjackobs\Desktop\MSPen_script_test_data\raw)")
+sample_dir <- gsub("\\\\", "/", r"(C:\Users\Jacob\OneDrive - Baylor College of Medicine\Documents\Manoj\Microbial-Project\Data\Normal muscle vs Highly Infected)")
 
 ## Full path to feature list, otherwise NA
-#feature_file <- gsub("\\\\", "/", r"(C:\Users\fjackobs\FEATURE_FILE.csv)")
-feature_file <- NA
-feature_file <- gsub("\\\\", "/", r"(C:\Users\fjackobs\OneDrive - Baylor College of Medicine\01_Eberlin_Lab\03_My-Code-Scripts\R\MDACC_Ovarian\DESI Prostate Annotations adjusted - Neg.csv)")
+feature_file <- gsub("\\\\", "/", r"(C:\Users\Jacob\Box\Eberlin_Lab_BCM\People\MANOJ\Renamed_Gram_positive_Gram_negative_Isolates_May2025\molecular Identity with Chemical  Formula\Microbes_Identified_features_May_2025.xlsx)")
 
 ## Full path to background peak list, otherwise NA
-#background_file <- gsub("\\\\", "/", r"(C:\Users\fjackobs\BACKGROUND_FILE.csv)")
 background_file <- NA
-background_file <- gsub("\\\\", "/", r"(C:\Users\fjackobs\Desktop\MSPen_script_test_data\mdacc_background_peaks_P16_scan221.csv)")
 
 ## ---------------------------------------------------------------------------
 
@@ -89,7 +82,7 @@ scans <- 1
 mass_range <- c(100,1000)
 
 ## Peak Alignment Method: "clustering", "binning", or "featurelist"
-peak_alignment_method <- "featurelist"
+peak_alignment_method <- "clustering"
 
 ## If peak alignment method is "clustering":
 clust_h <- 0.05 ## Height at which to cut dendrogram to determine clusters
@@ -99,18 +92,27 @@ ppm_error <- 5 ## Mass error tolerance of sample peaks to match to feature peaks
 
 ## Normalization Method: "tic", "maxpeak", "median", "medianlog", or "none"
 normalization_method <- "tic" 
+
+## Target m/z values of interest for ratio plots
+## These values come from the gram classification Lasso ratio features
+## From "Microbial-Project\outputs\ratio-lasso_gram_featurelist_2025-06-23\2025-06-23_16.12_ratio-lasso_gram_featurelist.html"
+target_mz <- c(174.0884, 688.4923, 245.0433, 746.4519, 325.114, 702.5079, 730.5392, 509.3484, 728.5236, 749.5248, 242.155, 735.5182, 253.2173, 325.114, 270.1863, 358.216, 662.4766, 765.53, 714.5079, 925.5677)
 ```
 
 ```{r create output directory, include = FALSE}
 proj_name <- tools::file_path_sans_ext(basename(rstudioapi::getSourceEditorContext()$path))
 
-out_dir <- paste0(Sys.Date(), "_", proj_name)
+out_dir <- file.path("outputs", paste0(proj_name, "_", Sys.Date()))
 
-if(!file.exists(out_dir)) {   dir.create(out_dir) }
+if(!file.exists(out_dir)) {   
+  dir.create(out_dir, recursive = TRUE) 
+  }
 
-files_dir <- paste0(format(Sys.time(), "%Y-%m-%d_%H.%M"), "_", proj_name, "_files")
+files_dir <- file.path(out_dir, paste0(format(Sys.time(), "%Y-%m-%d_%H.%M"), "_", proj_name, "_files"))
 
-if(!file.exists(file.path(out_dir,files_dir))) {   dir.create(file.path(out_dir,files_dir)) }
+if(!file.exists(files_dir)) {   
+  dir.create(files_dir, recursive = TRUE) 
+  }
 ```
 
 ```{r other settings}
@@ -130,17 +132,43 @@ classes <- gsub(file.path(sample_dir, "/"), "", list.dirs(sample_dir, recursive=
 ```
 
 ```{r file extension}
-sample_file_ext <- unique(unlist(
-  lapply(classes, function(x) 
-    tools::file_ext(list.files(file.path(sample_dir, "/",x,"/"))))))[1] 
-## only take the first file extension type...tbd if more than one type in folder
+## Looking at all files since there is an extra directory level between classes and the files themselves
+all_files <- list.files(sample_dir, recursive = TRUE, full.names = TRUE)
+exts <- unique(tools::file_ext(all_files))
+
+if (length(exts) == 0) {
+  stop("No files found under sample_dir!")
+} else if (length(exts) > 1) {
+  warning("Multiple extensions detected: ", paste(exts, collapse = ", "))
+}
+
+sample_file_ext <- exts[1]
 ```
 
 ```{r file names}
-file_name_list <- lapply(classes, function(x) 
-  list.files(path = file.path(sample_dir,x), pattern = paste0("*.", sample_file_ext), full.names = TRUE))
+## Added in extra level so that we keep species or skeletal/muscle information for possible future analysis
+file_name_list <- lapply(classes, function(cl) {
+  # find every species folder under class “cl”
+  species_dirs <- list.dirs(
+    path       = file.path(sample_dir, cl), 
+    recursive  = FALSE, 
+    full.names = TRUE
+  )
+  
+  # list files in each species folder, matching .<ext> at the end
+  files_per_species <- lapply(species_dirs, function(sp) {
+    list.files(
+      path       = sp,
+      pattern    = paste0("\\.", sample_file_ext, "$"),  # regex for “.ext” at end
+      full.names = TRUE
+    )
+  })
+  
+  # flatten into one vector and return
+  unlist(files_per_species, use.names = FALSE)
+})
 
-## Ensure patient ordering is consistent across different OSes.
+# ensure consistent ordering
 file_name_list <- lapply(file_name_list, sort)
 ```
 
@@ -363,7 +391,155 @@ yall <- foreach(i = 1:length(file_name_list), .combine = c) %do% {
 yall <- factor(yall,levels=c("1","2"),labels = classes)
 ```
 
+``` {r select peaks of interest}
+## Match peaks in xall to target peaks
+matched_mz <- sapply(target_mz, function(x) {
+  colnames(xall)[which.min(abs(as.numeric(colnames(xall)) - x))]
+})
+target_data <- xall[, matched_mz]
 
+## Check mass error of selected peaks
+target_data_mass_error <- abs(as.numeric(colnames(target_data)) - target_mz)
+print(target_data_mass_error)
+
+## Rename using actual peak name
+colnames(target_data) <- target_mz
+target_data <- as.matrix(target_data)
+```
+
+``` {r ratios}
+## Select ratio peaks (From "Microbial-Project\outputs\ratio-lasso_gram_featurelist_2025-06-23\2025-06-23_16.12_ratio-lasso_gram_featurelist.html")
+numerator <- target_data[, c("174.0884", "245.0433", "325.114", "325.114", "509.3484", "509.3484", "242.155", "253.2173", "270.1863", "662.4766", "714.5079")]
+denominator <- target_data[, c("688.4923", "746.4519", "702.5079", "730.5392", "728.5236", "749.5248", "735.5182", "325.114", "358.216", "765.53", "925.5677")]
+
+## Calculate ratios
+ratio_df <- purrr::map_dfr(
+  seq_along(numerator),
+  function(i) {
+    num_name <- colnames(numerator)[i]
+    denom_name <- colnames(denominator)[i]
+    data.frame(
+      class = yall,
+      ratio = numerator[[i]] / denominator[[i]],
+      ratio_label = paste0("m/z ", num_name, " / ", denom_name),
+      stringsAsFactors = FALSE
+    )
+  }
+)
+ratio_df <- ratio_df |>
+  mutate(class = factor(class, levels = sort(unique(class))))
+
+## Remove ratios not from feature list
+ratio_df <- ratio_df |>
+  filter(ratio_label != "m/z NA / NA")
+```
+
+``` {r plots}
+## Split into a list of one-ratio data frames
+ratio_list <- split(ratio_df, ratio_df$ratio_label)
+
+## Faceted boxplot by ratio
+plot_list <- imap(ratio_list, function(df, ratio_nm) {
+  ggplot(df, aes(x = class, y = ratio)) +
+    geom_boxplot(outlier.shape = NA, alpha = 0.6) +
+    geom_jitter(width = 0.2, size = 0.8, alpha = 0.4) +
+    labs(
+      title = ratio_nm,
+      x     = "Tumor Percentage (%)",
+      y     = "Intensity Ratio"
+    ) +
+    theme_minimal(base_size = 14) +
+    theme(
+      axis.text.x = element_text(size = 11),
+      axis.title  = element_text(size = 14),
+      plot.title  = element_text(hjust = 0.5)
+    )
+})
+
+# If you want to inspect the first plot in the RStudio viewer:
+print(plot_list[[12]])
+
+## Save plots
+imap(plot_list, function(p, ratio_nm) {
+  
+  # make a file‑safe name, e.g. "m_z_174.0884___688.4923.png"
+  safe_nm <- paste0(
+    "ratio_", 
+    gsub("[^0-9A-Za-z]+", "_", ratio_nm),
+    ".png"
+  )
+  
+  # full path in your files_dir
+  out_path <- file.path(files_dir, safe_nm)
+  
+  # save with your preferred dimensions & dpi
+  ggsave(
+    filename = out_path,
+    plot     = p,
+    width    = 8,
+    height   = 10,
+    dpi      = 300,
+    bg       = "white"
+  )
+  
+  invisible(NULL)
+})
+```
+
+``` {r binned class plots}
+## Faceted boxplot by ratio
+binned_plot <- ggplot(ratio_df, aes(x = binned_class, y = ratio)) +
+  geom_boxplot(outlier.shape = NA, fill = "lightblue", alpha = 0.6) +
+  geom_jitter(width = 0.2, size = 0.8, alpha = 0.4) +
+  facet_wrap(~ ratio_label, scales = "free_y", ncol = 1) +
+  labs(
+    title = "Ratios of Selected Peaks By Tumor Percentage",
+    x = "Tumor Percentage (%)",
+    y = "Intensity Ratio"
+  ) +
+  theme_minimal(base_size = 14) +
+  theme(
+    strip.text = element_text(size = 13),
+    axis.text.x = element_text(size = 11),
+    axis.title = element_text(size = 14),
+    plot.title = element_text(hjust = 0.5)
+  )
+ggsave(filename = file.path(files_dir, "peak-binned_lung_ratio_plot_binned-2.png"),
+       plot = binned_plot,
+       width = 8,
+       height = 10,
+       dpi = 300,
+       bg = "white")
+```
+
+``` {r 10 vs 90}
+## 10% vs 90% plots
+ratio_subset <- ratio_df |>
+  filter(class %in%)
+## Faceted boxplot by ratio
+binned_plot <- ggplot(ratio_df, aes(x = binned_class, y = ratio)) +
+  geom_boxplot(outlier.shape = NA, fill = "lightblue", alpha = 0.6) +
+  geom_jitter(width = 0.2, size = 0.8, alpha = 0.4) +
+  facet_wrap(~ ratio_label, scales = "free_y", ncol = 1) +
+  labs(
+    title = "Ratios of Selected Peaks By Tumor Percentage",
+    x = "Tumor Percentage (%)",
+    y = "Intensity Ratio"
+  ) +
+  theme_minimal(base_size = 14) +
+  theme(
+    strip.text = element_text(size = 13),
+    axis.text.x = element_text(size = 11),
+    axis.title = element_text(size = 14),
+    plot.title = element_text(hjust = 0.5)
+  )
+ggsave(filename = file.path(files_dir, "lung_ratio_plot_binned.png"),
+       plot = binned_plot,
+       width = 8,
+       height = 10,
+       dpi = 300,
+       bg = "white")
+```
 
 
 
