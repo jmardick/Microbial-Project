@@ -93,10 +93,11 @@ ppm_error <- 5 ## Mass error tolerance of sample peaks to match to feature peaks
 ## Normalization Method: "tic", "maxpeak", "median", "medianlog", or "none"
 normalization_method <- "tic" 
 
-## Target m/z values of interest for ratio plots
+## Select ratio peaks
 ## These values come from the gram classification Lasso ratio features
 ## From "Microbial-Project\outputs\ratio-lasso_gram_featurelist_2025-06-23\2025-06-23_16.12_ratio-lasso_gram_featurelist.html"
-target_mz <- c(174.0884, 688.4923, 245.0433, 746.4519, 325.114, 702.5079, 730.5392, 509.3484, 728.5236, 749.5248, 242.155, 735.5182, 253.2173, 325.114, 270.1863, 358.216, 662.4766, 765.53, 714.5079, 925.5677)
+num_mz <- c(174.0884, 245.0433, 325.114, 325.114, 509.3484, 509.3484, 242.155, 253.2173, 270.1863, 662.4766, 714.5079)
+den_mz <- c(688.4923, 746.4519, 702.5079, 730.5392, 728.5236, 749.5248, 735.5182, 325.114, 358.216, 765.53, 925.5677)
 ```
 
 ```{r create output directory, include = FALSE}
@@ -393,157 +394,117 @@ yall <- factor(yall,levels=c("1","2"),labels = classes)
 
 ``` {r select peaks of interest}
 ## Match peaks in xall to target peaks
-matched_mz <- sapply(target_mz, function(x) {
-  colnames(xall)[which.min(abs(as.numeric(colnames(xall)) - x))]
-})
-target_data <- xall[, matched_mz]
-
-## Check mass error of selected peaks
-target_data_mass_error <- abs(as.numeric(colnames(target_data)) - target_mz)
-print(target_data_mass_error)
-
-## Rename using actual peak name
-colnames(target_data) <- target_mz
-target_data <- as.matrix(target_data)
+col_mzs <- as.numeric(colnames(xall))
+num_idx <- sapply(num_mz, function(m) which.min(abs(col_mzs - m)))
+den_idx <- sapply(den_mz, function(m) which.min(abs(col_mzs - m)))
 ```
 
 ``` {r ratios}
-## Select ratio peaks (From "Microbial-Project\outputs\ratio-lasso_gram_featurelist_2025-06-23\2025-06-23_16.12_ratio-lasso_gram_featurelist.html")
-numerator <- target_data[, c("174.0884", "245.0433", "325.114", "325.114", "509.3484", "509.3484", "242.155", "253.2173", "270.1863", "662.4766", "714.5079")]
-denominator <- target_data[, c("688.4923", "746.4519", "702.5079", "730.5392", "728.5236", "749.5248", "735.5182", "325.114", "358.216", "765.53", "925.5677")]
+## Build numerator and denominator matrices
+numerator <- xall[, num_idx]
+denominator <- xall[, den_idx]
+
+## Manually check pairs
+head(
+  data.frame(
+    sample = rownames(xall)[1:5],
+    num    = numerator[1:5, 1],
+    den    = denominator[1:5, 1],
+    ratio  = log(numerator[1:5, 1] / denominator[1:5, 1])
+  )
+)
 
 ## Calculate ratios
-ratio_df <- purrr::map_dfr(
-  seq_along(numerator),
-  function(i) {
-    num_name <- colnames(numerator)[i]
-    denom_name <- colnames(denominator)[i]
-    data.frame(
-      class = yall,
-      ratio = numerator[[i]] / denominator[[i]],
-      ratio_label = paste0("m/z ", num_name, " / ", denom_name),
-      stringsAsFactors = FALSE
-    )
-  }
-)
+ratio_df <- purrr::map_dfr(seq_len(ncol(numerator)), function(i) {
+  tibble(
+    class = yall,
+    ratio = log(numerator[, i] / denominator[, i]),
+    ratio_label = paste0("m/z ", num_mz[i], " / ", den_mz[i])
+  )
+})
+
+## Make sure class is a factor
 ratio_df <- ratio_df |>
   mutate(class = factor(class, levels = sort(unique(class))))
 
-## Remove ratios not from feature list
-ratio_df <- ratio_df |>
-  filter(ratio_label != "m/z NA / NA")
+## Split into one df per ratio
+ratio_list <- split(ratio_df, ratio_df$ratio_label)
 ```
 
 ``` {r plots}
-## Split into a list of one-ratio data frames
-ratio_list <- split(ratio_df, ratio_df$ratio_label)
+## Plot each ratio separately and save
+## Infinities are capped to just outside the min/max values and labelled accordingly
+imap(ratio_list, function(df, ratio_nm) {
 
-## Faceted boxplot by ratio
-plot_list <- imap(ratio_list, function(df, ratio_nm) {
-  ggplot(df, aes(x = class, y = ratio)) +
-    geom_boxplot(outlier.shape = NA, alpha = 0.6) +
-    geom_jitter(width = 0.2, size = 0.8, alpha = 0.4) +
+  # 1) Compute caps and flag infs
+  fin <- df$ratio[is.finite(df$ratio)]
+  top_cap <- max(fin, na.rm = TRUE) * 1.1
+  bot_cap <- min(fin, na.rm = TRUE) * 0.9
+
+  df2 <- df %>%
+    mutate(
+      plot_ratio = case_when(
+        ratio ==  Inf ~ top_cap,
+        ratio == -Inf ~ bot_cap,
+        TRUE          ~ ratio
+      ),
+      inf_type = case_when(
+        ratio ==  Inf ~ "posInf",
+        ratio == -Inf ~ "negInf",
+        TRUE          ~ "finite"
+      )
+    )
+
+  # 2) Plot
+  p <- ggplot(df2, aes(x = class, y = plot_ratio, shape = inf_type)) +
+    # boxplot of only finite values
+    geom_boxplot(
+      data = filter(df2, inf_type=="finite"),
+      aes(y = plot_ratio),
+      width = 0.4, outlier.shape = NA, alpha = 0.2
+    ) +
+    # jitter all points, shape by inf_type
+    geom_jitter(
+      width = 0.15, size = 1.8, alpha = 0.7, colour = "black"
+    ) +
+    # shapes: circle for finite, up triangle for +Inf, down triangle for -Inf
+    scale_shape_manual(
+      values = c(
+        finite = 16,
+        posInf = 24,   # ▲ filled
+        negInf = 25    # ▼ filled
+      )
+    ) +
+    # y-axis from bot_cap to top_cap, labeling caps as “-Inf” and “Inf”
+    scale_y_continuous(
+      limits = c(bot_cap, top_cap),
+      breaks = c(pretty(fin, 4), bot_cap, top_cap),
+      labels = c(pretty(fin, 4), "-Inf", "Inf")
+    ) +
     labs(
       title = ratio_nm,
-      x     = "Tumor Percentage (%)",
+      x     = "Tissue Type",
       y     = "Intensity Ratio"
     ) +
     theme_minimal(base_size = 14) +
     theme(
-      axis.text.x = element_text(size = 11),
-      axis.title  = element_text(size = 14),
-      plot.title  = element_text(hjust = 0.5)
+      axis.text.x   = element_text(size = 11),
+      plot.title    = element_text(hjust = 0.5),
+      legend.position = "none"
     )
-})
 
-# If you want to inspect the first plot in the RStudio viewer:
-print(plot_list[[12]])
-
-## Save plots
-imap(plot_list, function(p, ratio_nm) {
-  
-  # make a file‑safe name, e.g. "m_z_174.0884___688.4923.png"
-  safe_nm <- paste0(
-    "ratio_", 
-    gsub("[^0-9A-Za-z]+", "_", ratio_nm),
-    ".png"
-  )
-  
-  # full path in your files_dir
-  out_path <- file.path(files_dir, safe_nm)
-  
-  # save with your preferred dimensions & dpi
+  # 3) Save
+  safe_nm <- paste0("ratio_", gsub("[^0-9A-Za-z]+","_",ratio_nm),".png")
   ggsave(
-    filename = out_path,
+    filename = file.path(files_dir, safe_nm),
     plot     = p,
-    width    = 8,
-    height   = 10,
-    dpi      = 300,
-    bg       = "white"
+    width    = 8, height = 10,
+    dpi      = 300, bg = "white"
   )
-  
+
   invisible(NULL)
 })
 ```
-
-``` {r binned class plots}
-## Faceted boxplot by ratio
-binned_plot <- ggplot(ratio_df, aes(x = binned_class, y = ratio)) +
-  geom_boxplot(outlier.shape = NA, fill = "lightblue", alpha = 0.6) +
-  geom_jitter(width = 0.2, size = 0.8, alpha = 0.4) +
-  facet_wrap(~ ratio_label, scales = "free_y", ncol = 1) +
-  labs(
-    title = "Ratios of Selected Peaks By Tumor Percentage",
-    x = "Tumor Percentage (%)",
-    y = "Intensity Ratio"
-  ) +
-  theme_minimal(base_size = 14) +
-  theme(
-    strip.text = element_text(size = 13),
-    axis.text.x = element_text(size = 11),
-    axis.title = element_text(size = 14),
-    plot.title = element_text(hjust = 0.5)
-  )
-ggsave(filename = file.path(files_dir, "peak-binned_lung_ratio_plot_binned-2.png"),
-       plot = binned_plot,
-       width = 8,
-       height = 10,
-       dpi = 300,
-       bg = "white")
-```
-
-``` {r 10 vs 90}
-## 10% vs 90% plots
-ratio_subset <- ratio_df |>
-  filter(class %in%)
-## Faceted boxplot by ratio
-binned_plot <- ggplot(ratio_df, aes(x = binned_class, y = ratio)) +
-  geom_boxplot(outlier.shape = NA, fill = "lightblue", alpha = 0.6) +
-  geom_jitter(width = 0.2, size = 0.8, alpha = 0.4) +
-  facet_wrap(~ ratio_label, scales = "free_y", ncol = 1) +
-  labs(
-    title = "Ratios of Selected Peaks By Tumor Percentage",
-    x = "Tumor Percentage (%)",
-    y = "Intensity Ratio"
-  ) +
-  theme_minimal(base_size = 14) +
-  theme(
-    strip.text = element_text(size = 13),
-    axis.text.x = element_text(size = 11),
-    axis.title = element_text(size = 14),
-    plot.title = element_text(hjust = 0.5)
-  )
-ggsave(filename = file.path(files_dir, "lung_ratio_plot_binned.png"),
-       plot = binned_plot,
-       width = 8,
-       height = 10,
-       dpi = 300,
-       bg = "white")
-```
-
-
-
-
 
 <br>
 
