@@ -75,7 +75,7 @@ library(scales) ## for integer y-axis on histogram
 ```{r user input}
 ## Full path to folder with sample files (excel or csv, or raw Thermo files)
 ## PASTE PATH IN BETWEEN INNER PARENTHASIS WITH QUOTES ON THE OUTSIDE -- NO NEED TO CHANGE BACKSLASHES TO FORWARD SLASHES
-sample_dir <- gsub("\\\\", "/", r"(C:\Users\Jacob\Box\Eberlin_Lab_BCM\People\MANOJ\Renamed_Gram_positive_Gram_negative_Isolates_May2025\Species_Excel)")
+sample_dir <- gsub("\\\\", "/", r"(C:\Users\Jacob\Box\Eberlin_Lab_BCM\People\MANOJ\Renamed_Gram_positive_Gram_negative_Isolates_May2025\Excel files)")
 
 ## Full path to feature list, otherwise NULL
 feature_file <- gsub("\\\\", "/", r"(C:\Users\Jacob\Box\Eberlin_Lab_BCM\People\MANOJ\Renamed_Gram_positive_Gram_negative_Isolates_May2025\molecular Identity with Chemical  Formula\Microbes_Identified_features_May_2025.xlsx)")
@@ -420,25 +420,18 @@ yall <- factor(sample_names_df$class,levels=c(classes),labels = classes)
 
 ## Create data for training
 
-``` {r rob training}
-mz.x <- colnames(xall)
-## Look at Rob's rc2 script. I have inserted here a dummy code to match his, but this is where we can match
-## m/z peaks with actual metabolite names
-nams.x <- mz.x
-```
-
 ## Train/Test Split
 
-```{r traintest}
-set.seed(12444)
-trainfrac <- 0.7
-train_partition <- createDataPartition(
-  yall,
-  p = trainfrac,
-  times = 2,
-  list = TRUE )
-
-otr <- train_partition$Resample2
+``` {r split}
+sample_names_df <- read.csv("C:/Users/Jacob/OneDrive - Baylor College of Medicine/Documents/Manoj/Microbial-Project/Data/sample_names_df.csv")
+sample_names_df <- sample_names_df[order(sample_names_df$X),]
+test_count <- round(table(sample_names_df$class)*0.3,0)
+test_index <- vector()
+for (c in classes){
+  test_index <- c(test_index, sample(which(sample_names_df$class == c & is.na(sample_names_df$patient)), size = test_count[c]))
+}
+otr <- (1:nrow(sample_names_df))[-test_index]
+sample_names_df$train_test_set <- ifelse(sample_names_df$X %in% otr, "train", "test")
 ```
 
 ## Below taken from Rob rc2 script for ratio calculations prior to Lasso
@@ -448,7 +441,6 @@ otr <- train_partition$Resample2
 compute_logratios_with_bounds <- function(x, feature_names = NULL, min_valid = 10) {
   n_features <- ncol(x)
   n_samples <- nrow(x)
-  combs <- 
   n_ratios <- choose(n_features, 2)
   
   ## Initialize
