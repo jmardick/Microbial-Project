@@ -128,7 +128,19 @@ if(!file.exists(files_dir)) {
 
 ```{r file extension}
 ## 
-classes <- c("gram_negative", "gram_positive")
+classes_path <- gsub(file.path(sample_dir, "/"), "", list.dirs(sample_dir)[c(-1)], fixed=TRUE)
+
+classes <- strsplit(classes_path, "/")
+classes <- classes[lapply(classes,length)==1]
+
+classes_path <- lapply(classes, function(x) paste(x, collapse = '/'))
+
+classes <- sapply(classes, `[`, 1)
+classes <- unique(classes)
+classes <- classes[!is.na(classes)]
+classes <- trimws(classes)
+
+names(classes_path) <- classes
 
 ## check file extension
 sample_file_ext <- "xlsx"
@@ -136,7 +148,7 @@ sample_file_ext <- "xlsx"
 
 ```{r file and sample names}
 ## file names
-file_name_list <- lapply(classes, function(x) 
+file_name_list <- lapply(classes_path, function(x) 
   list.files(path = file.path(sample_dir,x), pattern = paste0("*.", sample_file_ext), full.names = TRUE, recursive = TRUE))
 
 ## Ensure patient ordering is consistent across different OSes.
@@ -405,25 +417,22 @@ yall <- factor(yall,levels=c("1","2"),labels = classes)
 
 ## Create data for training
 
-``` {r rob training}
-mz.x <- colnames(xall)
-## Look at Rob's rc2 script. I have inserted here a dummy code to match his, but this is where we can match
-## m/z peaks with actual metabolite names
-nams.x <- mz.x
-```
-
 ## Train/Test Split
 
-```{r traintest}
-set.seed(12444)
-trainfrac <- 0.7
-train_partition <- createDataPartition(
-  yall,
-  p = trainfrac,
-  times = 2,
-  list = TRUE )
+``` {r split}
+sample_names_df <- read.csv("C:/Users/Jacob/OneDrive - Baylor College of Medicine/Documents/Manoj/Microbial-Project/Data/sample_names_df.csv")
+sample_names_df <- sample_names_df[order(sample_names_df$X),]
 
-otr <- train_partition$Resample2
+## Gram stain classification
+sample_names_df$gram <- ifelse(sample_names_df$class %in% c("Enterobacter cloacae complex", "Escherichia coli", "Haemophilus influenzae", "Klebsiella pneumoniae", "Pseudomonas aeruginosa"), "Gram-negative", "Gram-positive")
+
+test_count <- round(table(sample_names_df$gram)*0.3,0)
+test_index <- vector()
+for (c in classes){
+  test_index <- c(test_index, sample(which(sample_names_df$gram == c & is.na(sample_names_df$patient)), size = test_count[c]))
+}
+otr <- (1:nrow(sample_names_df))[-test_index]
+sample_names_df$train_test_set <- ifelse(sample_names_df$X %in% otr, "train", "test")
 ```
 
 ## Below taken from Rob rc2 script for ratio calculations prior to Lasso
@@ -458,8 +467,7 @@ compute_logratios_with_bounds <- function(x, feature_names = NULL, min_valid = 1
         q99 <- quantile(valid_vals, 0.99)
         
       } else {
-        q01 <- quantile(ratio, 0.01, na.rm = TRUE)
-        q99 <- quantile(ratio, 0.99, na.rm = TRUE)
+        NA
       }
       
       ## Restore directionality of -Inf and +Inf
@@ -492,6 +500,7 @@ nams.p <- nams.p[na_free_cols]
 
 ## Keeping naming scheme the same
 xtrain <- allpairs[otr,]
+xtrain <- as(xtrain, "dgCMatrix")
 xtest <- allpairs[-otr,]
 ytrain <- yall[otr]
 ytest <- yall[-otr]
@@ -503,7 +512,8 @@ model <- glmnet(
   standardize = FALSE, ## because intensities are already in same units
   lambda.min.ratio = 1e-05 ) ## The model will compute its own lambda sequence based on nlambda and lambda.min.ratio 
 
-nfolds <- nrow(xtrain)
+#nfolds <- nrow(xtrain)
+nfolds <- 10
 cvmodel <- cv.glmnet(xtrain, ytrain, nfolds = nfolds, family = "binom", type.measure = "class", standardize = F, keep = T)
 ```
 
