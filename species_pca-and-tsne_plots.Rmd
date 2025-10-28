@@ -1,0 +1,264 @@
+---
+title: "Microbe Species PCA and t-SNE"
+author: "Jacob Mardick"
+date: "`r format(Sys.time(), '%B %d, %Y %H:%M')`"
+knit: (function(inputFile, encoding) { 
+      proj_name <- tools::file_path_sans_ext(basename(inputFile));
+      out_dir <- file.path("outputs", paste0(proj_name, "_", Sys.Date()));
+      if(!file.exists(out_dir)) {   dir.create(out_dir) };
+      rmarkdown::render(inputFile,
+                        encoding=encoding, 
+                        output_file=file.path(dirname(inputFile), 
+                        out_dir, 
+                        paste0(format(Sys.time(), "%Y-%m-%d_%H.%M"),"_", proj_name, ".html"))) 
+                        })
+
+output: 
+  html_document:
+    keep_md: yes
+    df_print: paged
+    toc: false
+geometry: margin=0.5in
+editor_options: 
+  markdown: 
+    wrap: 72
+---
+
+```{=html}
+<style type="text/css">
+.main-container {
+max-width: 1600px;
+margin-left: auto;
+margin-right: auto;
+}
+</style>
+```
+
+```{css, echo=FALSE}
+h1, h2, h3, h4, h5 {
+font-size: 20px;
+}
+
+h1, h2, h3, h4, h5, p {
+text-align: center;
+}
+```
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(message = FALSE, warning = FALSE, echo = FALSE, cache = FALSE)
+```
+
+``` {r data}
+load(gsub("\\\\", "/", r"(C:\Users\Jacob\OneDrive - Baylor College of Medicine\Documents\Manoj\Microbial-Project\outputs\binning_processed_bacterial_isolates_2025-10-27\2025-10-27_binning_processed_bacterial_isolates.RData)"))
+
+sample_order <- rownames(xall)
+match_idx <- match(sample_order, class_df$V13)
+yall <- class_df$V11[match_idx] ## Species classification
+#yall <- class_df$V10[match_idx] ## Gram classification
+#yall <- class_df$genus[match_idx] ## Genus
+stopifnot(all(names(yall) == rownames(xall)))
+```
+
+```{r create directory for output files, include = FALSE}
+proj_name <- tools::file_path_sans_ext(basename(rstudioapi::getSourceEditorContext()$path))
+
+out_dir <- file.path("outputs", paste0(proj_name, "_", Sys.Date()))
+
+if(!file.exists(out_dir)) {   
+  dir.create(out_dir, recursive = TRUE) 
+  }
+
+files_dir <- file.path(out_dir, paste0(format(Sys.time(), "%Y-%m-%d_%H.%M"), "_", proj_name, "_files"))
+
+if(!file.exists(files_dir)) {   
+  dir.create(files_dir, recursive = TRUE) 
+  }
+```
+
+```{r pca}
+# Run PCA
+xall_filtered <- xall[, apply(xall, 2, function(col) sd(col) != 0)]
+pca <- prcomp(xall_filtered, center = TRUE, scale. = TRUE)
+
+# Calculate variance explained
+var_explained <- (pca$sdev)^2 / sum(pca$sdev^2)
+pc_labels <- paste0("PC", 1:2, " (", round(var_explained[1:2] * 100, 1), "%)")
+
+# Create PCA data frame
+pca_df <- data.frame(PC1 = pca$x[, 1],
+                     PC2 = pca$x[, 2],
+                     class = yall)
+
+
+plot4 <- ggplot(pca_df, aes(x = PC1, y = PC2, color = class)) +
+  geom_point(alpha = 0.5, size = 1.2) +
+  labs(
+    title = "PCA of All Features by Class", 
+    x = paste0("PC1 (", round(summary(pca)$importance[2, 1] * 100, 1), "%)"),
+    y = paste0("PC2 (", round(summary(pca)$importance[2, 2] * 100, 1), "%)"),
+    color = "Class"
+  ) +
+  theme_minimal() +
+  theme(legend.position = "right",
+        plot.title = element_text(size = 22, hjust = 0.5),
+        axis.title.x = element_text(size = 16),
+        axis.title.y = element_text(size = 16),
+        legend.title = element_text(size = 16),
+        legend.text = element_text(size = 14)
+        ) +
+  guides(color = guide_legend(override.aes = list(size = 4)))
+
+ggsave(plot4, 
+       width = 8,        # wider than default
+       height = 8,        # adjust as needed for aspect ratio
+       units = "in",      # specify inches
+       dpi = 300,  
+       file = file.path(files_dir, paste0("pure-isolates_pca_class.png"))
+       )
+
+# Variance explained
+var_explained <- pca$sdev^2 / sum(pca$sdev^2)
+
+# Create a data frame for plotting
+elbow_df <- data.frame(
+  PC = paste0("PC", 1:length(var_explained)),
+  Variance = var_explained
+)
+
+# Plot
+plot5 <- ggplot(elbow_df[1:36, ], aes(x = seq_along(Variance), y = Variance)) +
+  geom_line() +
+  geom_point() +
+  # scale_x_continuous(breaks = 1:20) +
+  labs(title = "PCA Scree Plot",
+       x = "Principal Component",
+       y = "Proportion of Variance Explained") +
+  theme_minimal() +
+  theme(plot.title = element_text(size = 22, hjust = 0.5),
+        axis.title.x = element_text(size = 16),
+        axis.title.y = element_text(size = 16),
+        axis.text.x = element_text(size = 14),
+        axis.text.y = element_text(size = 14)
+        )
+
+ggsave(plot5, 
+       width = 4.67,        # wider than default
+       height = 7,        # adjust as needed for aspect ratio
+       units = "in",      # specify inches
+       dpi = 300,  
+       file = file.path(files_dir, paste0("pure-isolates_scree-plot.png"))
+       )
+```
+
+``` {r PCA features}
+features_per_pc <- lapply(1:7, function(i) {
+  pc_loadings <- pca$rotation[, i]
+  pc_loadings_sorted <- sort(abs(pc_loadings), decreasing = TRUE)
+  top_features <- names(pc_loadings_sorted)[1:10]
+  data.frame(
+    PC = paste0("PC", i),
+    Feature = top_features,
+    Loading = pc_loadings[top_features]
+  )
+}) |> dplyr::bind_rows()
+
+features_per_pc
+write.csv(features_per_pc, file = file.path(files_dir, paste0("PCA-features.csv")))
+
+library(tidyverse)
+
+# Create long-format data frame of loadings for the first 7 PCs
+load_df <- as.data.frame(pca$rotation[, 1:7]) %>%
+  rownames_to_column(var = "Feature") %>%      # add feature names (m/z)
+  pivot_longer(
+    cols = starts_with("PC"),
+    names_to = "PC",
+    values_to = "Loading"
+  ) %>%
+  mutate(Feature = as.numeric(Feature))
+
+plot7 <- ggplot(load_df, aes(x = Feature, y = abs(Loading), group = PC)) +
+  geom_line(color = "steelblue") +
+  facet_wrap(~ PC, scales = "free_y", ncol = 2) +
+  scale_x_continuous(
+    breaks = seq(100, 1000, by = 100),    # adjust range & increment
+    limits = c(100, 1000)                 # clip to your data range if needed
+  ) +
+  theme_minimal() +
+  labs(
+    title = "Principal Component Loadings per Feature",
+    x = "Feature (m/z)",
+    y = "Absolute Loading Value"
+  ) +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1, size = 9),
+    axis.ticks.x = element_line(),
+    strip.text = element_text(size = 14),
+    plot.title = element_text(hjust = 0.5, size = 18)
+  )
+
+ggsave(plot7, 
+       width = 12,
+       height = 10,
+       units = "in",
+       dpi = 300,  
+       file = file.path(files_dir, paste0("PCA-feature-distribution.png"))
+       )
+```
+
+```{r tsne}
+library(Rtsne)
+library(pals)
+library(colorspace)
+
+# Use top 10 PCs (adjust based on the elbow)
+pca_input <- pca$x[, 1:7]
+dupe_idx <- !duplicated(pca_input)  # TRUE for rows kept
+# Remove duplicate rows
+pca_input_unique <- pca_input[dupe_idx, ]
+
+# Run t-SNE on unique inputs
+set.seed(42)
+tsne_result <- Rtsne(pca_input_unique, dims = 2, perplexity = 42, max_iter = 7000, verbose = TRUE, pca = FALSE, normalize = FALSE)
+
+# Now map the t-SNE result back
+tsne_coords <- matrix(NA, nrow = nrow(pca_input), ncol = 2)
+tsne_coords[dupe_idx, ] <- tsne_result$Y  # fill only the non-duplicated rows
+
+# Make data.frame for plotting
+tsne_df <- data.frame(
+  X = tsne_coords[, 1],
+  Y = tsne_coords[, 2],
+  class = yall
+) |> na.omit()
+
+color_classes <- sort(unique(tsne_df$class))
+tsne_colors <- pals::polychrome(length(color_classes)) ## For species classification
+#tsne_colors <- pals::glasbey(length(color_classes)) ## For gram classification
+names(tsne_colors) <- color_classes
+
+plot6 <- ggplot(tsne_df, aes(x = X, y = Y, fill = class)) +
+  geom_point(shape = 21, color = "black", alpha = 1, size = 2.5) +
+  scale_fill_manual(values = tsne_colors) +
+  theme_minimal() +
+  labs(title = "t-SNE of Pure Isolate Top 7 Principal Components", fill = "Species") +
+  guides(color = guide_legend(override.aes = list(size = 3))) +   # increase color dot size
+  theme(
+    axis.title = element_blank(),
+    axis.text = element_blank(),
+    axis.ticks = element_blank(),
+    panel.grid = element_blank(),
+    legend.title = element_text(size = 16),
+    legend.text = element_text(size = 14),
+    legend.position = "right",
+    plot.title = element_text(hjust = 0.5, size = 18)
+  )
+plot6
+ggsave(plot6, 
+       width = 12,
+       height = 10,
+       units = "in",
+       dpi = 300,  
+       file = file.path(files_dir, paste0("pure-isolates_tsne_class.png"))
+       )
+```
