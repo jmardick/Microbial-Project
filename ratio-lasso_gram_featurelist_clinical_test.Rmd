@@ -69,13 +69,13 @@ library(scales) ## for integer y-axis on histogram
 
 ```{r user input}
 ## processing settings and model file
-model_path <- gsub("\\\\", "/", r"(C:\Users\Jacob\OneDrive - Baylor College of Medicine\Documents\Manoj\Microbial-Project\outputs\ratio-lasso_gram_featurelist_2025-10-20\2025-10-20_15.13_ratio-lasso_gram_featurelist_files\2025-10-20_16.12_ratio-lasso_gram_featurelist_model.RData)")
+model_path <- gsub("\\\\", "/", r"(C:\Users\Jacob\OneDrive - Baylor College of Medicine\Documents\Manoj\Microbial-Project\outputs\ratio-lasso_gram_featurelist_2025-11-03\2025-11-03_14.55_ratio-lasso_gram_featurelist_files\2025-11-03_14.58_ratio-lasso_gram_featurelist_model.RData)")
 
 ## Full path to folder with sample files (excel or csv, or raw Thermo files)
 sample_dir <- gsub("\\\\", "/", r"(C:\Users\Jacob\Box\Eberlin_Lab_BCM\People\MANOJ\Renamed_Gram_positive_Gram_negative_Isolates_May2025\Highly Infected sample\Extracted Data excel sheet)")
 
 ## Full path to feature list, otherwise NULL
-feature_file <- gsub("\\\\", "/", r"(C:\Users\Jacob\Box\Eberlin_Lab_BCM\People\MANOJ\Renamed_Gram_positive_Gram_negative_Isolates_May2025\molecular Identity with Chemical  Formula\Microbes_Identified_features_May_2025.xlsx)")
+feature_file <- gsub("\\\\", "/", r"(C:\Users\Jacob\Box\Eberlin_Lab_BCM\People\MANOJ\Renamed_Gram_positive_Gram_negative_Isolates_May2025\molecular Identity with Chemical  Formula\Master Feature List July_2025.xlsx)")
 ```
 
 ```{r create directory for output files, include = FALSE}
@@ -747,137 +747,4 @@ kable(test_samples,
                 bootstrap_options = "condensed",
                 html_font = "Calibri",
                 font_size = 12)
-```
-
-```{r pca}
-# Run PCA
-xall1_filtered <- xall1[, apply(xall1, 2, function(col) sd(col) != 0)]
-pca <- prcomp(xall1_filtered, center = TRUE, scale. = TRUE)
-
-# Calculate variance explained
-var_explained <- (pca$sdev)^2 / sum(pca$sdev^2)
-pc_labels <- paste0("PC", 1:2, " (", round(var_explained[1:2] * 100, 1), "%)")
-
-# Create PCA data frame
-pca_df <- data.frame(PC1 = pca$x[, 1],
-                     PC2 = pca$x[, 2],
-                     class = yall)
-
-
-plot4 <- ggplot(pca_df, aes(x = PC1, y = PC2, color = class)) +
-  geom_point(alpha = 0.5, size = 1.2) +
-  labs(
-    title = "PCA of All Log-Ratio Features by Class", 
-    x = paste0("PC1 (", round(summary(pca)$importance[2, 1] * 100, 1), "%)"),
-    y = paste0("PC2 (", round(summary(pca)$importance[2, 2] * 100, 1), "%)"),
-    color = "Class"
-  ) +
-  theme_minimal() +
-  theme(legend.position = "right",
-        plot.title = element_text(size = 22, hjust = 0.5),
-        axis.title.x = element_text(size = 16),
-        axis.title.y = element_text(size = 16),
-        legend.title = element_text(size = 16),
-        legend.text = element_text(size = 14)
-        ) +
-  guides(color = guide_legend(override.aes = list(size = 4)))
-
-ggsave(plot4, 
-       width = 8,        # wider than default
-       height = 8,        # adjust as needed for aspect ratio
-       units = "in",      # specify inches
-       dpi = 300,  
-       file = file.path(files_dir, paste0("pca_class.png"))
-       )
-
-# Variance explained
-var_explained <- pca$sdev^2 / sum(pca$sdev^2)
-
-# Create a data frame for plotting
-elbow_df <- data.frame(
-  PC = paste0("PC", 1:length(var_explained)),
-  Variance = var_explained
-)
-
-# Plot
-plot5 <- ggplot(elbow_df[1:36, ], aes(x = seq_along(Variance), y = Variance)) +
-  geom_line() +
-  geom_point() +
-  # scale_x_continuous(breaks = 1:20) +
-  labs(title = "Log-Ratio Feature PCA Scree Plot",
-       x = "Principal Component",
-       y = "Proportion of Variance Explained") +
-  theme_minimal() +
-  theme(plot.title = element_text(size = 22, hjust = 0.5),
-        axis.title.x = element_text(size = 16),
-        axis.title.y = element_text(size = 16),
-        axis.text.x = element_text(size = 14),
-        axis.text.y = element_text(size = 14)
-        )
-
-ggsave(plot5, 
-       width = 4.67,        # wider than default
-       height = 7,        # adjust as needed for aspect ratio
-       units = "in",      # specify inches
-       dpi = 300,  
-       file = file.path(files_dir, paste0("scree-plot.png"))
-       )
-```
-
-```{r tsne}
-library(Rtsne)
-
-# Use top 10 PCs (adjust based on the elbow)
-pca_input <- pca$x[, 1:10]
-dupe_idx <- !duplicated(pca_input)  # TRUE for rows kept
-# Remove duplicate rows
-pca_input_unique <- pca_input[dupe_idx, ]
-
-# Store mapping to original rows if you need to join later
-pca_input_idx <- match(data.frame(t(pca_input_unique)) |> as.list(), 
-                       data.frame(t(pca_input)) |> as.list())
-
-# Run t-SNE on unique inputs
-set.seed(42)
-tsne_result <- Rtsne(pca_input_unique, dims = 2, perplexity = 3, max_iter = 1000, verbose = TRUE)
-
-# Now map the t-SNE result back
-tsne_coords <- matrix(NA, nrow = nrow(pca_input), ncol = 2)
-tsne_coords[dupe_idx, ] <- tsne_result$Y  # fill only the non-duplicated rows
-
-# Make data.frame for plotting
-tsne_df <- data.frame(
-  X = tsne_coords[, 1],
-  Y = tsne_coords[, 2],
-  class = yall,
-  sample = sample_names_df$sample_id
-)
-
-tsne_df_clean <- tsne_df[complete.cases(tsne_df[, c("X", "Y")]), ]
-
-plot6 <- ggplot(tsne_df_clean, aes(x = X, y = Y, color = class)) +
-  geom_point(alpha = 0.5, size = 1.2) +
-  theme_minimal() +
-  labs(title = "t-SNE of Top 10 Log-Ratio PCs", color = "Class") +
-  guides(
-    color = guide_legend(override.aes = list(size = 3)),   # increase color dot size
-  ) +
-  theme(
-    axis.title = element_blank(),
-    axis.text = element_blank(),
-    axis.ticks = element_blank(),
-    panel.grid = element_blank(),
-    legend.title = element_text(size = 16),
-    legend.text = element_text(size = 14),
-    legend.position = "right",
-    plot.title = element_text(hjust = 0.5, size = 18)
-  )
-plot6
-ggsave(plot6, 
-       width = 4.67,        # wider than default
-       height = 7,        # adjust as needed for aspect ratio
-       units = "in",      # specify inches
-       dpi = 300,  
-       file = file.path(files_dir, paste0("tsne_class.png"))
-       )
 ```
