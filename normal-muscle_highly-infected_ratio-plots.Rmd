@@ -55,6 +55,7 @@ library(reshape2)
 library(readxl)
 library(rawrr)
 library(sqldf)
+library(readxl)
 
 library(stringr)
 library(doParallel)
@@ -67,7 +68,7 @@ library(johnfuncs)
 sample_dir <- gsub("\\\\", "/", r"(C:\Users\Jacob\OneDrive - Baylor College of Medicine\Documents\Manoj\Microbial-Project\Data\Normal muscle vs Highly Infected)")
 
 ## Full path to feature list, otherwise NA
-feature_file <- gsub("\\\\", "/", r"(C:\Users\Jacob\Box\Eberlin_Lab_BCM\People\MANOJ\Renamed_Gram_positive_Gram_negative_Isolates_May2025\molecular Identity with Chemical  Formula\Microbes_Identified_features_May_2025.xlsx)")
+feature_file <- gsub("\\\\", "/", r"(C:\Users\Jacob\Box\Eberlin_Lab_BCM\People\MANOJ\Renamed_Gram_positive_Gram_negative_Isolates_May2025\molecular Identity with Chemical  Formula\Master Feature List July_2025.xlsx)")
 
 ## Full path to background peak list, otherwise NA
 background_file <- NA
@@ -96,8 +97,12 @@ normalization_method <- "tic"
 ## Select ratio peaks
 ## These values come from the gram classification Lasso ratio features
 ## From "Microbial-Project\outputs\ratio-lasso_gram_featurelist_2025-06-23\2025-06-23_16.12_ratio-lasso_gram_featurelist.html"
-num_mz <- c(174.0884, 245.0433, 325.114, 325.114, 509.3484, 509.3484, 242.155, 253.2173, 270.1863, 662.4766, 714.5079)
-den_mz <- c(688.4923, 746.4519, 702.5079, 730.5392, 728.5236, 749.5248, 735.5182, 325.114, 358.216, 765.53, 925.5677)
+ratio_input <- gsub("\\\\", "/", r"(C:\Users\Jacob\OneDrive - Baylor College of Medicine\Documents\Manoj\Microbial-Project\Some expected mz ratio _5aug2025.xlsx)")
+ratio_input <- read_xlsx(ratio_input, sheet = "Sheet1") # Ratios picked by Manoj
+#ratio_input <- read_xlsx(ratio_input, sheet = "Sheet2") # Ratios selected as gram lasso features
+
+num_mz <- ratio_input$mz1
+den_mz <- ratio_input$mz2
 ```
 
 ```{r create output directory, include = FALSE}
@@ -183,6 +188,13 @@ sample_names_df <- purrr::map_df(sample_names_list, ~as.data.frame(.x), .id="id"
 colnames(sample_names_df) <- c("class", "sample_name")
 ```
 
+```{r species list}
+species_list <- lapply(file_name_list, function(paths) {
+  basename(dirname(paths))
+})
+species_list <- unlist(species_list, use.names = FALSE)
+```
+
 ```{r csv data}
 if (sample_file_ext == "csv") {
   fixed_objects <- list(mass_range = mass_range, SNR_thresh = SNR_thresh)
@@ -235,7 +247,7 @@ if (peak_alignment_method == "clustering") {
   ## Cluster peaks into centroids
   tree <- fcluster(all_mz)
   clust_mz <- fcutree(all_mz, tree, h=clust_h)
-  clustMZ <- sort(clust_mz$cen)
+  clustMZ <- sort(clust_mz$centroid)
   
   ## Match cluster centroids to sample peaks
   clusterMatrixList <- lapply(spectra_list, function(x, y, z, w) 
@@ -254,7 +266,7 @@ if (peak_alignment_method == "clustering") {
   
   filtered_mz <- clustMZ[mz_count_filter]
   
-  centroid_min_max <- identify_clusters(clust_mz, all_mz)
+  centroid_min_max <- identify_clusters(clust_mz, all_mz, filtered_mz)
   
   ## FILTER #4: REMOVE BACKGROUND PEAKS (IF BACKGROUND FILE PRESENT)
   if (!is.na(background_file)) {
@@ -327,8 +339,9 @@ if (peak_alignment_method == "featurelist") {
   background_file <- NA
   
   ## Read file with feature peaks
-  feature_df <- read.csv(feature_file, header = TRUE)
-  feature_peaks <- feature_df[,1]
+  feature_df <- read_xlsx(feature_file)
+  feature_peaks <- unlist(feature_df[,2])
+  
   
   ## Feature mz plus/minus instrument mass error, round to 3 decimal places
   mass_error <- (ppm_error * feature_peaks)/1e6
@@ -390,6 +403,8 @@ yall <- foreach(i = 1:length(file_name_list), .combine = c) %do% {
 
 ## factorize yall
 yall <- factor(yall,levels=c("1","2"),labels = classes)
+species <- foreach(i = 1:length(file_name_list), .combine = c) %do% {
+  rep(i, length(file_name_list[[i]])) }
 ```
 
 ``` {r select peaks of interest}
@@ -418,8 +433,13 @@ head(
 ratio_df <- purrr::map_dfr(seq_len(ncol(numerator)), function(i) {
   tibble(
     class = yall,
-    ratio = log(numerator[, i] / denominator[, i]),
-    ratio_label = paste0("m/z ", num_mz[i], " / ", den_mz[i])
+    ratio = ifelse(
+      (numerator[, i] != 0 & denominator[, i] != 0), ## Only calculates if both peaks are present
+      log(numerator[, i] / denominator[, i]), 
+      NA_real_),
+    ratio_label = paste0("m/z ", num_mz[i], " / m/z ", den_mz[i]),
+    sample = rownames(xall),
+    species = species_list
   )
 })
 
@@ -429,76 +449,126 @@ ratio_df <- ratio_df |>
 
 ## Split into one df per ratio
 ratio_list <- split(ratio_df, ratio_df$ratio_label)
+ratio_list <- ratio_list[c("m/z 748.528 / m/z 749.532","m/z 747.518 / m/z 748.528")]
 ```
 
 ``` {r plots}
 ## Plot each ratio separately and save
 ## Infinities are capped to just outside the min/max values and labelled accordingly
+## Plot each ratio separately and save
+library(scales)
+library(ggpubr)
+library(viridis)
+library(ggnewscale)
+library(purrr)
+library(dplyr)
+library(ggplot2)
+
 imap(ratio_list, function(df, ratio_nm) {
-
-  # 1) Compute caps and flag infs
-  fin <- df$ratio[is.finite(df$ratio)]
-  top_cap <- max(fin, na.rm = TRUE) * 1.1
-  bot_cap <- min(fin, na.rm = TRUE) * 0.9
-
+  
+  ## Filter out non-finite ratios
   df2 <- df %>%
-    mutate(
-      plot_ratio = case_when(
-        ratio ==  Inf ~ top_cap,
-        ratio == -Inf ~ bot_cap,
-        TRUE          ~ ratio
-      ),
-      inf_type = case_when(
-        ratio ==  Inf ~ "posInf",
-        ratio == -Inf ~ "negInf",
-        TRUE          ~ "finite"
-      )
-    )
+    filter(is.finite(ratio)) # Removes NA (Including Inf and -Inf from above ratio_df code)
 
-  # 2) Plot
-  p <- ggplot(df2, aes(x = class, y = plot_ratio, shape = inf_type)) +
-    # boxplot of only finite values
+  ## Split by class
+  muscle_df  <- df2 %>% filter(class == "Uninfected Muscle")
+  species_df <- df2 %>% filter(class != "Uninfected Muscle")
+
+  ## Define colors
+  muscle_names <- sort(unique(muscle_df$species))
+  species_names <- sort(unique(species_df$species))
+
+  muscle_cols  <- c("red", "blue")[seq_along(muscle_names)]
+  species_cols <- viridisLite::viridis(length(species_names), option = "H")
+
+  ## Define y-axis breaks
+  fin <- df2$ratio
+  fin_breaks <- pretty(fin, 5)
+
+  ## Base plot
+  p <- ggplot(df2, aes(x = class, y = ratio)) +
+    
+    ## Neutral boxplots
     geom_boxplot(
-      data = filter(df2, inf_type=="finite"),
-      aes(y = plot_ratio),
-      width = 0.4, outlier.shape = NA, alpha = 0.2
+      width = 0.4, outlier.shape = NA, alpha = 0.2,
+      color = "black", fill = "gray90"
     ) +
-    # jitter all points, shape by inf_type
+
+    ## Muscle points
     geom_jitter(
-      width = 0.15, size = 1.8, alpha = 0.7, colour = "black"
+      data = muscle_df,
+      aes(fill = species),
+      color = "black",
+      shape = 21,               # filled circles
+      width = 0.15, size = 2, alpha = 0.9,
+      show.legend = TRUE
     ) +
-    # shapes: circle for finite, up triangle for +Inf, down triangle for -Inf
-    scale_shape_manual(
-      values = c(
-        finite = 16,
-        posInf = 24,   # ▲ filled
-        negInf = 25    # ▼ filled
-      )
+    scale_fill_manual(
+      name = "Muscle Type",
+      values = setNames(muscle_cols, muscle_names),
+      guide = guide_legend(override.aes = list(shape = 21, size = 3, fill = muscle_cols),
+                           order = 2)
     ) +
-    # y-axis from bot_cap to top_cap, labeling caps as “-Inf” and “Inf”
+
+    ## Reset color scale for species legend
+    ggnewscale::new_scale_color() +
+
+    ## Species points
+    geom_jitter(
+      data = species_df,
+      aes(color = species),
+      shape = 16,               # same as muscle points visually
+      width = 0.15, size = 2, alpha = 0.9,
+      show.legend = TRUE
+    ) +
+    scale_color_manual(
+      name = "Infected Species",
+      values = setNames(species_cols, species_names),
+      guide = guide_legend(override.aes = list(size = 3),
+                           order = 1)
+    ) +
+
+    ## Wilcoxon Test
+    {
+      if (n_distinct(df2$class) == 2) {
+        stat_compare_means(
+          data = df2,
+          method = "wilcox.test",
+          comparisons = list(c("Uninfected Muscle", "Highly Infected Tissue")),
+          label = "p.format",
+          label.x = 1.5,
+          label.y = max(df2$ratio, na.rm = TRUE) * 1.02,
+          size = 5
+        )
+      } else NULL
+    } +
+
+    ## Axis & Theme
     scale_y_continuous(
-      limits = c(bot_cap, top_cap),
-      breaks = c(pretty(fin, 4), bot_cap, top_cap),
-      labels = c(pretty(fin, 4), "-Inf", "Inf")
+      breaks = fin_breaks,
+      expand = expansion(mult = c(0.05, 0.1))
     ) +
     labs(
       title = ratio_nm,
-      x     = "Tissue Type",
-      y     = "Intensity Ratio"
+      x = "Tissue Type",
+      y = "log(Finite TIC Normalized Intensity Ratio)"
     ) +
     theme_minimal(base_size = 14) +
     theme(
       axis.text.x   = element_text(size = 11),
-      plot.title    = element_text(hjust = 0.5),
-      legend.position = "none"
+      plot.title.position = "plot",
+      plot.title    = element_text(hjust = 0.5, margin = margin(b = 10)),
+      plot.margin = margin(t = 20, r = 20, b = 20, l = 20),
+      legend.position = "right",
+      legend.box = "vertical"
     )
 
-  # 3) Save
-  safe_nm <- paste0("ratio_", gsub("[^0-9A-Za-z]+","_",ratio_nm),".png")
+  ## Save
+  safe_nm <- paste0("ratio_", gsub("[^0-9A-Za-z]+", "_", ratio_nm), ".png")
   ggsave(
     filename = file.path(files_dir, safe_nm),
     plot     = p,
-    width    = 8, height = 10,
+    width    = 9, height = 12,
     dpi      = 300, bg = "white"
   )
 
@@ -543,8 +613,8 @@ kable(settings_df,
 ```
 
 ```{r R data, include = FALSE}
-save(list = ls(), 
-     file=file.path(out_dir, files_dir, paste0(format(Sys.time(), "%Y-%m-%d_%H.%M"), "_", proj_name,"_preprocessed.RData")))
+#save(list = ls(), 
+#     file=file.path(files_dir, paste0(format(Sys.time(), "%Y-%m-%d_%H.%M"), "_", #proj_name,"_preproc.RData")))
 ```
 
 <br>
