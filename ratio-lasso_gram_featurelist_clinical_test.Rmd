@@ -1,7 +1,9 @@
 ---
 title: "<span style='text-align: left;font-size: 25px;'>Culture-free Identification of Bacterial Infections with Ratio Lasso</span>"
 subtitle: "<span style='font-size: 20px;'>Gram Prediction m/z 100 - 1000 with Feature List</span><br><span style='font-size: 18px;color: #696969;'>Test Model with Clinical Patient Samples</span>"
-author: "<span style='font-size: 17px;'>`r Sys.info()[['user']]`</span><br><span style='font-size: 12px; color:#696969;'>Eberlin Lab, Department of Surgery<br>Baylor College of Medicine</span>"
+author: 
+  - "Code author: Jacob Mardick"
+  - "Code run by: `r Sys.info()[['user']]`"
 date: "<span style='font-size: 15px; color: black;'>`r format(Sys.time(), '%B %d, %Y %H:%M')`</span>"
 knit: (function(inputFile, encoding) { 
       proj_name <- tools::file_path_sans_ext(basename(inputFile));

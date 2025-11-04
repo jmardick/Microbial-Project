@@ -1,7 +1,9 @@
 ---
 title: "Ratio Lasso - Gram Stain Prediction"
 subtitle: "Renamed Sample Files"
-author: "Jacob Mardick"
+author: 
+  - "Code author: Jacob Mardick"
+  - "Code run by: `r Sys.info()[['user']]`"
 date: "`r format(Sys.time(), '%B %d, %Y %H:%M')`"
 knit: (function(inputFile, encoding) { 
       proj_name <- tools::file_path_sans_ext(basename(inputFile));
