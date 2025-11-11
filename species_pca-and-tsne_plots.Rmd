@@ -53,9 +53,9 @@ load(gsub("\\\\", "/", r"(C:\Users\Jacob\OneDrive - Baylor College of Medicine\D
 
 sample_order <- rownames(xall)
 match_idx <- match(sample_order, class_df$V13)
-yall <- class_df$V11[match_idx] ## Species classification
+#yall <- class_df$V11[match_idx] ## Species classification
 #yall <- class_df$V10[match_idx] ## Gram classification
-#yall <- class_df$genus[match_idx] ## Genus
+yall <- class_df$genus[match_idx] ## Genus
 stopifnot(all(names(yall) == rownames(xall)))
 ```
 
@@ -75,7 +75,34 @@ if(!file.exists(files_dir)) {
   }
 ```
 
+``` {r plot colors}
+species_colors <- c("Staphylococcus aureus" = "#CAB2D6",
+                    "Staphylococcus epidermidis" = "#6A3D9A",
+                    "Enterococcus faecalis" = "#FB9A99",
+                    "Enterococcus faecium" = "#841011",
+                    "Streptococcus agalactiae"= "#FDBF6F",
+                    "Streptococcus pneumoniae" = "#FF7F00",
+                    "Streptococcus pyogenes" = "#B15928",
+                    "Enterobacter cloacae complex" = "#B2DF8A",
+                    "Escherichia coli" = "#33A02C",
+                    "Klebsiella pneumoniae" = "#20511D",
+                    "Haemophilus influenzae" = "#A6CEE3",
+                    "Pseudomonas aeruginosa" = "#1F78B4")
+genus_colors <- c("Staphylococcus" = "#9A78B8",
+                  "Enterococcus" = "#C05555",
+                  "Streptococcus" = "#EB8626",
+                  "Enterobacter" = "#B2DF8A",
+                  "Escherichia" = "#33A02C",
+                  "Klebsiella" = "#20511D",
+                  "Haemophilus" = "#A6CEE3",
+                  "Pseudomonas" = "#1F78B4")
+strep_colors <- c( "#B15928", "#FDBF6F")
+staph_strep_colors <- rev(c("#9A78B8", "#EB8626"))
+gram_colors <- c("#A2292B", "#6AAC61")
+```
+
 ```{r pca}
+library(ggplot2)
 # Run PCA
 xall_filtered <- xall[, apply(xall, 2, function(col) sd(col) != 0)]
 pca <- prcomp(xall_filtered, center = TRUE, scale. = TRUE)
@@ -98,6 +125,7 @@ plot4 <- ggplot(pca_df, aes(x = PC1, y = PC2, color = class)) +
     y = paste0("PC2 (", round(summary(pca)$importance[2, 2] * 100, 1), "%)"),
     color = "Class"
   ) +
+  scale_color_manual(values = genus_colors, name = "Genus") + ## Genus colors
   theme_minimal() +
   theme(legend.position = "right",
         plot.title = element_text(size = 22, hjust = 0.5),
@@ -230,19 +258,23 @@ tsne_df <- data.frame(
   X = tsne_coords[, 1],
   Y = tsne_coords[, 2],
   class = yall
-) |> na.omit()
+) |> na.omit() |>
+  mutate(class = factor(class, levels = c("Staphylococcus",
+                  "Enterococcus",
+                  "Streptococcus",
+                  "Enterobacter",
+                  "Escherichia",
+                  "Klebsiella",
+                  "Haemophilus",
+                  "Pseudomonas")))
 
-color_classes <- sort(unique(tsne_df$class))
-tsne_colors <- pals::polychrome(length(color_classes)) ## For species classification
-#tsne_colors <- pals::glasbey(length(color_classes)) ## For gram classification
-names(tsne_colors) <- color_classes
-
-plot6 <- ggplot(tsne_df, aes(x = X, y = Y, fill = class)) +
-  geom_point(shape = 21, color = "black", alpha = 1, size = 2.5) +
-  scale_fill_manual(values = tsne_colors) +
+plot6 <- ggplot(tsne_df, aes(x = X, y = Y)) +
+  geom_point(aes(fill = class, color = class), shape = 21, alpha = 0.75, size = 2.5) +
+  scale_fill_manual(values = genus_colors) + ## Change this based on which color scheme
+  scale_color_manual(values = genus_colors) +
   theme_minimal() +
-  labs(title = "t-SNE of Pure Isolate Top 7 Principal Components", fill = "Species") +
-  guides(color = guide_legend(override.aes = list(size = 3))) +   # increase color dot size
+  labs(title = "t-SNE of Pure Isolate Top 7 Principal Components", fill = "Genus", color = "Genus") +
+  # guides(fill = guide_legend(override.aes = list(alpha = 1, size = 3, color = genus_colors)), color = "none") +   # increase color dot size
   theme(
     axis.title = element_blank(),
     axis.text = element_blank(),
@@ -253,6 +285,7 @@ plot6 <- ggplot(tsne_df, aes(x = X, y = Y, fill = class)) +
     legend.position = "right",
     plot.title = element_text(hjust = 0.5, size = 18)
   )
+
 plot6
 ggsave(plot6, 
        width = 12,
@@ -261,4 +294,9 @@ ggsave(plot6,
        dpi = 300,  
        file = file.path(files_dir, paste0("pure-isolates_tsne_class.png"))
        )
+```
+
+```{r save model, include=FALSE}
+save(plot6, file=file.path(files_dir, paste0(format(Sys.time(), "%Y-%m-%d_%H.%M"),"_",proj_name, "_tsne.RData")))
+
 ```
