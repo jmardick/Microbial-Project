@@ -323,7 +323,7 @@ ratio_plots <- imap(ratio_list, function(df, ratio_nm) {
       aes(fill = species),
       color = "black",
       shape = 21,               # filled circles
-      width = 0.15, size = 2.8, alpha = 0.75,
+      width = 0.15, size = 5.6, alpha = 0.75,
       show.legend = TRUE,
       stroke = 0
     ) +
@@ -333,7 +333,7 @@ ratio_plots <- imap(ratio_list, function(df, ratio_nm) {
       guide = guide_legend(
         override.aes = list(
           shape = 21,
-          size = 3,
+          size = 6,
           fill = muscle_cols,
           alpha = 0.75,   ## <-- MATCH ALPHA HERE
           stroke = 0
@@ -350,7 +350,7 @@ ratio_plots <- imap(ratio_list, function(df, ratio_nm) {
       data = species_df,
       aes(color = species),
       shape = 16,               # same as muscle points visually
-      width = 0.15, size = 2.3, alpha = 0.75,
+      width = 0.15, size = 4.6, alpha = 0.75,
       show.legend = TRUE
     ) +
     scale_color_manual(
@@ -358,7 +358,7 @@ ratio_plots <- imap(ratio_list, function(df, ratio_nm) {
       values = species_colors,
       labels = species_labels_expression,
       guide = guide_legend(
-        override.aes = list(size = 3, alpha = 0.75),
+        override.aes = list(size = 6, alpha = 0.75),
         order = 1
       )
     ) +
@@ -373,7 +373,7 @@ ratio_plots <- imap(ratio_list, function(df, ratio_nm) {
           label = "p.format",
           label.x = 1.5,
           label.y = max(df2$ratio, na.rm = TRUE) * 1.02,
-          size = 5
+          size = 6
         )
       } else NULL
     } +
@@ -388,14 +388,22 @@ ratio_plots <- imap(ratio_list, function(df, ratio_nm) {
       x = "Tissue Type",
       y = "log(Intensity Ratio)"
     ) +
-    theme_minimal(base_size = 14) +
+    scale_x_discrete(
+      labels = c(
+        "Highly Infected Tissue" = "Highly Infected",
+        "Uninfected Muscle" = "Uninfected"
+      )
+    ) +
+    theme_minimal(base_size = 20) +
     theme(
-      axis.text.x   = element_text(size = 11),
+      axis.text.x   = element_text(size = 18),
       plot.title.position = "plot",
       plot.title    = element_text(hjust = 0.5, margin = margin(b = 10)),
       plot.margin = margin(t = 20, r = 20, b = 20, l = 20),
       legend.position = "right",
-      legend.box = "vertical"
+      legend.box = "vertical",
+      legend.title = element_text(size = 18),
+      legend.text = element_text(size = 16)
     )
 
   ## Save
@@ -416,10 +424,10 @@ title_A <- bquote(bold("A. Ratios of " * bolditalic("m/z") * " 747.518 : " * bol
 title_B <- bquote(bold("B. Ratios of " * bolditalic("m/z") * " 748.528 : " * bolditalic("m/z") * " 749.532"))
 
 p1 <- ratio_plots[["m/z 747.518 / m/z 748.528"]] + ggtitle(title_A) +
-  theme(plot.title = element_text(hjust = 0))
+  theme(plot.title = element_text(hjust = 0, size = 18.5))
 
 p2 <- ratio_plots[["m/z 748.528 / m/z 749.532"]] + ggtitle(title_B) +
-  theme(plot.title = element_text(hjust = 0))
+  theme(plot.title = element_text(hjust = 0, size = 18.5))
 
 combined_plot <- ggarrange(
   p1, p2,
@@ -544,7 +552,7 @@ p3 <- ggplot(dd1, aes(x = as.numeric(mz), y = intensity * 100)) +
     data = distinct(dd1, facet_col), 
     aes(x = 300, y = 95, label = facet_col), 
     hjust = 0, 
-    size = 5, 
+    size = 6, 
     fontface = "bold" 
     ) + 
   
@@ -577,7 +585,7 @@ p3 <- ggplot(dd1, aes(x = as.numeric(mz), y = intensity * 100)) +
         axis.line.y = element_line(linewidth = 0.2, colour = "black"), 
         axis.ticks = element_line(linewidth = 0.2, colour = "black"), 
         plot.background = element_rect(fill = "white"), 
-        text = element_text(size = 14), 
+        text = element_text(size = 20),
         legend.position = "none", 
         plot.margin = margin(20, 20, 30, 20)) + 
   
@@ -593,11 +601,11 @@ p3 <- ggplot(dd1, aes(x = as.numeric(mz), y = intensity * 100)) +
     x = list( 
       zoom == "Full Spectrum" ~ scale_x_continuous( 
         breaks = seq(100, 1000, by = 100), 
-        expand = expansion(mult = c(0, 0), add = c(5, 5)) 
+        expand = expansion(mult = c(0, 0), add = c(15, 5)) 
       ), 
       zoom == "Ratio Peaks Region" ~ scale_x_continuous( 
         limits = c(747, 750), 
-        breaks = seq(747, 750, by = 0.5), 
+        breaks = seq(747, 750, by = 1), 
         expand = expansion(mult = c(0, 0), add = c(0.25, 0.25)) 
       ) 
     ), 
@@ -610,7 +618,7 @@ p3 <- ggplot(dd1, aes(x = as.numeric(mz), y = intensity * 100)) +
       zoom == "Ratio Peaks Region" ~ scale_y_continuous(
         limits = c(0, 100),
         breaks = seq(0, 100, 20),
-        expand = c(0, 0)
+        expand = expansion(mult = c(0, 0), add = c(0, 10))
       )
     )
   ) + 
@@ -626,7 +634,7 @@ p3 <- ggplot(dd1, aes(x = as.numeric(mz), y = intensity * 100)) +
                   force = 1, 
                   min.segment.length = 0, 
                   na.rm = TRUE, 
-                  size = 4, 
+                  size = 5.5, 
                   color = "black", 
                   parse = TRUE, 
                   segment.color = NA) + 
@@ -636,14 +644,14 @@ p3 <- ggplot(dd1, aes(x = as.numeric(mz), y = intensity * 100)) +
             y = -15, 
             label = "m/z", 
             hjust = 0.5, 
-            size = 5, 
+            size = 8, 
             fontface = "bold.italic") + 
   geom_text(data = data.frame(zoom = "Ratio Peaks Region"), 
             x = c(NA, 748.5), 
             y = -15, 
             label = "m/z", 
             hjust = 0.5, 
-            size = 5, 
+            size = 8, 
             fontface = "bold.italic")
 
 p3
@@ -653,7 +661,8 @@ p3
 ## Add panel-C title
 title_C <- bquote(bold("C. Mass spectra of infected tissue and uninfected muscle and their ratio-defining peaks"))
 p3 <- p3 + ggtitle(title_C) +
-  theme(plot.title = element_text(hjust = 0, size = 16, face = "bold"))
+  theme(plot.title.position = "plot",
+        plot.title = element_text(hjust = 0, size = 18.5, face = "bold"))
 
 
 #### ---- Combine into Figure 4 ---- ####
