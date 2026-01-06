@@ -75,10 +75,10 @@ library(scales) ## for integer y-axis on histogram
 ```{r user input}
 ## Full path to folder with sample files (excel or csv, or raw Thermo files)
 ## PASTE PATH IN BETWEEN INNER PARENTHASIS WITH QUOTES ON THE OUTSIDE -- NO NEED TO CHANGE BACKSLASHES TO FORWARD SLASHES
-sample_dir <- gsub("\\\\", "/", r"(C:\Users\Jacob\Box\Eberlin_Lab_BCM\People\MANOJ\Renamed_Gram_positive_Gram_negative_Isolates_May2025\Excel files)")
+sample_dir <- gsub("\\\\", "/", r"(C:\Users\Jacob\Box\Eberlin_Lab_BCM\People\MANOJ\Renamed_Gram_positive_Gram_negative_Isolates_May2025\Excel files\Gram-positive\Staphylococcus aureus)")
 
 ## Full path to feature list, otherwise NULL
-feature_file <- gsub("\\\\", "/", r"(C:\Users\Jacob\Box\Eberlin_Lab_BCM\People\MANOJ\Renamed_Gram_positive_Gram_negative_Isolates_May2025\molecular Identity with Chemical  Formula\Microbes_Identified_features_May_2025.xlsx)")
+feature_file <- gsub("\\\\", "/", r"(C:\Users\Jacob\Box\Eberlin_Lab_BCM\Projects\Bacterial Identification\feature_peak_lists\Master Feature List July_2025_dedup-formulacorrected-20251111.csv)")
 
 ## Full path to background peak list, otherwise NULL
 background_file <- NULL
@@ -131,15 +131,11 @@ if(!file.exists(files_dir)) {
 classes_path <- gsub(file.path(sample_dir, "/"), "", list.dirs(sample_dir)[c(-1)], fixed=TRUE)
 
 classes <- strsplit(classes_path, "/")
-classes <- classes[lapply(classes,length)==3]
 
 classes_path <- lapply(classes, function(x) paste(x, collapse = '/'))
 
-classes <- sapply(classes, `[`, 3)
 classes <- unique(classes)
 classes <- classes[!is.na(classes)]
-classes <- gsub("(_|\\s)?[Rr]enamed.*|(_|\\s)?[Ee]xcel.*", "", classes)
-classes <- trimws(classes)
 
 names(classes_path) <- classes
 
@@ -317,10 +313,8 @@ if (peak_alignment_method == "featurelist") {
   }else{
     
     ## Read file with feature peaks
-    feature_df <- read_excel(feature_file, col_names = TRUE)
-    ## TODO: What if CSV file?
-    
-    feature_peaks <- unlist(feature_df[,2])
+    feature_df <- read.csv(feature_file)
+    feature_peaks <- unlist(feature_df[,1])
     
     ## Feature mz plus/minus instrument mass error, round to 3 decimal places
     mass_error <- unlist((ppm_error * feature_peaks)/1e6)
@@ -377,7 +371,7 @@ if (peak_alignment_method == "featurelist") {
     
     ## turn list of lists into dataframe
     feature_matched_spectra <- lapply(feature_matched_spectra, function(x) x %>%
-                                        reduce(full_join,by = "feature_mass")) %>% reduce(full_join,by = "feature_mass")
+                                        reduce(full_join, by = "feature_mass")) %>% reduce(full_join,by = "feature_mass")
     
     ## sort by target_mz
     feature_matched_spectra <- feature_matched_spectra[order(feature_matched_spectra$feature_mass), ]
@@ -418,25 +412,30 @@ yall <- factor(yall,levels=c("1","2"),labels = classes)
 
 ## Create data for training
 
-``` {r rob training}
-mz.x <- colnames(xall)
-## Look at Rob's rc2 script. I have inserted here a dummy code to match his, but this is where we can match
-## m/z peaks with actual metabolite names
-nams.x <- mz.x
-```
-
 ## Train/Test Split
 
-```{r traintest}
-set.seed(12444)
-trainfrac <- 0.7
-train_partition <- createDataPartition(
-  yall,
-  p = trainfrac,
-  times = 2,
-  list = TRUE )
+``` {r split}
+sample_names_df <- read.csv("C:/Users/Jacob/OneDrive - Baylor College of Medicine/Documents/Manoj/Microbial-Project/Data/sample_names_df.csv")
+sample_names_df <- sample_names_df %>%
+  filter(sample_name %in% rownames(xall)) %>%
+  arrange(match(X, rownames(xall)))
 
-otr <- train_partition$Resample2
+set.seed(seed)
+test_count <- round(table(sample_names_df)*0.3,0)
+test_index <- vector()
+
+for (lbl in levels(yall)){
+  idx <- which(yall == lbl & is.na(sample_names_df$patient))
+  n_test <- round(length(idx) * (1 - train_fraction))
+  if (n_test > 0) {
+    test_index <- c(test_index, sample(idx, n_test))
+  }
+}
+
+sample_names_df$train_test_set <- "train"
+sample_names_df$train_test_set[test_index] <- "test"
+
+otr <- which(sample_names_df$train_test_set == "train")
 ```
 
 ## Below taken from Rob rc2 script for ratio calculations prior to Lasso
@@ -471,8 +470,7 @@ compute_logratios_with_bounds <- function(x, feature_names = NULL, min_valid = 1
         q99 <- quantile(valid_vals, 0.99)
         
       } else {
-        q01 <- quantile(ratio, 0.01, na.rm = TRUE)
-        q99 <- quantile(ratio, 0.99, na.rm = TRUE)
+        NA
       }
       
       ## Restore directionality of -Inf and +Inf
@@ -505,6 +503,7 @@ nams.p <- nams.p[na_free_cols]
 
 ## Keeping naming scheme the same
 xtrain <- allpairs[otr,]
+xtrain <- as(xtrain, "dgCMatrix")
 xtest <- allpairs[-otr,]
 ytrain <- yall[otr]
 ytest <- yall[-otr]
@@ -516,7 +515,8 @@ model <- glmnet(
   standardize = FALSE, ## because intensities are already in same units
   lambda.min.ratio = 1e-05 ) ## The model will compute its own lambda sequence based on nlambda and lambda.min.ratio 
 
-nfolds <- nrow(xtrain)
+#nfolds <- nrow(xtrain)
+nfolds <- 10
 cvmodel <- cv.glmnet(xtrain, ytrain, nfolds = nfolds, family = "binom", type.measure = "class", standardize = F, keep = T)
 ```
 
@@ -1008,136 +1008,4 @@ kable(samples,
                 bootstrap_options = "condensed",
                 html_font = "Calibri",
                 font_size = 12)
-```
-
-```{r pca}
-# Run PCA
-allpairs_filtered <- allpairs[, apply(allpairs, 2, function(col) sd(col) != 0)]
-pca <- prcomp(allpairs_filtered, center = TRUE, scale. = TRUE)
-
-# Calculate variance explained
-var_explained <- (pca$sdev)^2 / sum(pca$sdev^2)
-pc_labels <- paste0("PC", 1:2, " (", round(var_explained[1:2] * 100, 1), "%)")
-
-# Create PCA data frame
-pca_df <- data.frame(PC1 = pca$x[, 1],
-                     PC2 = pca$x[, 2],
-                     class = yall)
-
-
-plot4 <- ggplot(pca_df, aes(x = PC1, y = PC2, color = class)) +
-  geom_point(alpha = 0.5, size = 1.2) +
-  labs(
-    title = "PCA of All Log-Ratio Features by Class", 
-    x = paste0("PC1 (", round(summary(pca)$importance[2, 1] * 100, 1), "%)"),
-    y = paste0("PC2 (", round(summary(pca)$importance[2, 2] * 100, 1), "%)"),
-    color = "Class"
-  ) +
-  theme_minimal() +
-  theme(legend.position = "right",
-        plot.title = element_text(size = 22, hjust = 0.5),
-        axis.title.x = element_text(size = 16),
-        axis.title.y = element_text(size = 16),
-        legend.title = element_text(size = 16),
-        legend.text = element_text(size = 14)
-        ) +
-  guides(color = guide_legend(override.aes = list(size = 4)))
-
-ggsave(plot4, 
-       width = 8,        # wider than default
-       height = 8,        # adjust as needed for aspect ratio
-       units = "in",      # specify inches
-       dpi = 300,  
-       file = file.path(files_dir, paste0("pure-isolates_pca_class.png"))
-       )
-
-# Variance explained
-var_explained <- pca$sdev^2 / sum(pca$sdev^2)
-
-# Create a data frame for plotting
-elbow_df <- data.frame(
-  PC = paste0("PC", 1:length(var_explained)),
-  Variance = var_explained
-)
-
-# Plot
-plot5 <- ggplot(elbow_df[1:36, ], aes(x = seq_along(Variance), y = Variance)) +
-  geom_line() +
-  geom_point() +
-  # scale_x_continuous(breaks = 1:20) +
-  labs(title = "Log-Ratio Feature PCA Scree Plot",
-       x = "Principal Component",
-       y = "Proportion of Variance Explained") +
-  theme_minimal() +
-  theme(plot.title = element_text(size = 22, hjust = 0.5),
-        axis.title.x = element_text(size = 16),
-        axis.title.y = element_text(size = 16),
-        axis.text.x = element_text(size = 14),
-        axis.text.y = element_text(size = 14)
-        )
-
-ggsave(plot5, 
-       width = 4.67,        # wider than default
-       height = 7,        # adjust as needed for aspect ratio
-       units = "in",      # specify inches
-       dpi = 300,  
-       file = file.path(files_dir, paste0("pure-isolates_scree-plot.png"))
-       )
-```
-
-```{r tsne}
-library(Rtsne)
-
-# Use top 10 PCs (adjust based on the elbow)
-pca_input <- pca$x[, 1:10]
-dupe_idx <- !duplicated(pca_input)  # TRUE for rows kept
-# Remove duplicate rows
-pca_input_unique <- pca_input[dupe_idx, ]
-
-# Store mapping to original rows if you need to join later
-pca_input_idx <- match(data.frame(t(pca_input_unique)) |> as.list(), 
-                       data.frame(t(pca_input)) |> as.list())
-
-# Run t-SNE on unique inputs
-set.seed(42)
-tsne_result <- Rtsne(pca_input_unique, dims = 2, perplexity = 50, max_iter = 1000, verbose = TRUE)
-
-# Now map the t-SNE result back
-tsne_coords <- matrix(NA, nrow = nrow(pca_input), ncol = 2)
-tsne_coords[dupe_idx, ] <- tsne_result$Y  # fill only the non-duplicated rows
-
-# Make data.frame for plotting
-tsne_df <- data.frame(
-  X = tsne_coords[, 1],
-  Y = tsne_coords[, 2],
-  class = yall
-)
-
-tsne_df_clean <- tsne_df[complete.cases(tsne_df[, c("X", "Y")]), ]
-
-plot6 <- ggplot(tsne_df_clean, aes(x = X, y = Y, color = class)) +
-  geom_point(alpha = 0.5, size = 1.2) +
-  theme_minimal() +
-  labs(title = "t-SNE of Top 10 Log-Ratio PCs", color = "Class") +
-  guides(
-    color = guide_legend(override.aes = list(size = 3)),   # increase color dot size
-  ) +
-  theme(
-    axis.title = element_blank(),
-    axis.text = element_blank(),
-    axis.ticks = element_blank(),
-    panel.grid = element_blank(),
-    legend.title = element_text(size = 16),
-    legend.text = element_text(size = 14),
-    legend.position = "right",
-    plot.title = element_text(hjust = 0.5, size = 18)
-  )
-plot6
-ggsave(plot6, 
-       width = 4.67,        # wider than default
-       height = 7,        # adjust as needed for aspect ratio
-       units = "in",      # specify inches
-       dpi = 300,  
-       file = file.path(files_dir, paste0("pure-isolates_tsne_class.png"))
-       )
 ```

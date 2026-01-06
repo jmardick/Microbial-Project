@@ -79,7 +79,7 @@ model_path <- gsub("\\\\", "/", r"(C:\Users\Jacob\OneDrive - Baylor College of M
 sample_dir <- gsub("\\\\", "/", r"(C:\Users\Jacob\Box\Eberlin_Lab_BCM\People\MANOJ\Renamed_Gram_positive_Gram_negative_Isolates_May2025\Highly Infected sample\Extracted Data excel sheet)")
 
 ## Full path to feature list, otherwise NULL
-feature_file <- gsub("\\\\", "/", r"(C:\Users\Jacob\Box\Eberlin_Lab_BCM\People\MANOJ\Renamed_Gram_positive_Gram_negative_Isolates_May2025\Microbial Manuscript Oct_2025\PNAS_Microbes_Supplementary_MSMS_30OCT2025.xlsx)")
+feature_file <- gsub("\\\\", "/", r"(C:\Users\Jacob\Box\Eberlin_Lab_BCM\Projects\Bacterial Identification\feature_peak_lists\Master Feature List July_2025_dedup-formulacorrected-20251111.csv)")
 ```
 
 ```{r create directory for output files, include = FALSE}
