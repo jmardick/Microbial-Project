@@ -1,0 +1,249 @@
+---
+title: "Model Outcomes on Clinical Sample Subset"
+subtitle: ""
+author: 
+  - "Code author: Faith Jackobs"
+  - "Code run by: `r Sys.info()[['user']]`"
+date: "`r format(Sys.Date(), '%B %d, %Y')`"
+knit: (function(inputFile, encoding) { 
+      proj_name <- tools::file_path_sans_ext(basename(inputFile));
+      out_dir <- file.path("outputs", paste0(proj_name, "_", Sys.Date()));
+      if(!file.exists(out_dir)) {   dir.create(out_dir) };
+      rmarkdown::render(inputFile,
+                        encoding=encoding, 
+                        output_file=file.path(dirname(inputFile), 
+                        out_dir, 
+                        paste0(format(Sys.time(), "%Y-%m-%d_%H.%M"),"_", proj_name, ".html"))) 
+                        })
+
+output: 
+  html_document:
+    keep_md: yes
+    df_print: paged
+    toc: false
+geometry: margin=0.5in
+editor_options: 
+  markdown: 
+    wrap: 72
+---
+
+```{=html}
+<style type="text/css">
+.main-container {
+max-width: 1600px;
+margin-left: auto;
+margin-right: auto;
+}
+</style>
+```
+
+```{css, echo=FALSE}
+h1, h2, h3, h4, h5 {
+font-size: 20px;
+}
+
+h1, h2, h3, h4, h5, p {
+text-align: center;
+}
+```
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(message = FALSE, warning = FALSE, echo = FALSE, cache = FALSE)
+```
+
+```{r libraries, message = FALSE, warning = FALSE}
+library(rmarkdown)
+library(knitr)
+library(kableExtra)
+library(ggpubr)
+
+library(tidyverse)
+library(reshape2)
+library(Matrix)
+library(dplyr)
+library(stringr)
+library(doParallel)
+library(fcluster)
+library(eberlinfuncs)
+
+library(readxl)
+library(sqldf)
+library(rawrr)
+
+library(caret)
+library(glmnet)
+library(pROC) 
+library(scales)
+
+library(flextable)
+library(officer)
+```
+
+
+
+```{r}
+## process specimen data
+## Full path to folder with sample files (excel or csv, or raw Thermo files)
+sample_dir <- gsub("\\\\", "/", r"(C:\Users\Jacob\Box\Eberlin_Lab_BCM\People\MANOJ\Renamed_Gram_positive_Gram_negative_Isolates_May2025\Highly Infected sample\Extracted Data excel sheet/)")
+
+## Full path to feature list, otherwise NA
+feature_file <- gsub("\\\\", "/", r"(C:\Users\Jacob\Box\Eberlin_Lab_BCM\Projects\Bacterial Identification\feature_peak_lists\Master Feature List July_2025.csv)")
+
+## Full path to background peak list, otherwise NA
+background_file <- NA
+
+SNR_thresh <- NULL
+
+ppm_error <- 5
+
+mass_range <- c(100,1000)
+
+## Peak Alignment Method: "clustering", "binning", or "featurelist"
+peak_alignment_method <- "featurelist"
+
+## If peak alignment method is "clustering": height at which to cut dendrogram to determine clusters
+clust_h <- 0.01 
+
+## Normalization Method: "tic", "maxpeak", "median", "medianlog", or "none"
+normalization_method <- "tic" 
+
+class_df <- pull_classes(sample_dir)
+class_df <- class_df %>%
+  mutate(genus = sapply(str_split(class_df$V12, " "), '[[', 1)) %>%
+  relocate(genus, .after = V11)
+
+spec <- process_ms_files(sample_dir, ppm = ppm_error, mass_range = mass_range)
+
+if (peak_alignment_method == "featurelist") {
+  
+  #features <- unlist(read_excel(feature_file, col_names = TRUE)[,1])
+  features <- read.csv(feature_file)[,1]
+  
+  ## subset features between mass range
+  features <- features[features >= mass_range[1] & features <= mass_range[2]]
+  
+  matched_spec <-  target_mz_alignment(spectra_list = spec, target_mz = features, ppm = ppm_error, handle_dups = "sum")
+  
+  aligned_spectra <- bind_rows(matched_spec, .id = "sample_name") %>%
+    pivot_wider(names_from = target_mz, values_from = intensity, values_fill = 0) %>%
+    column_to_rownames(var = "sample_name")
+}
+
+xtest <- normalize_pixel(aligned_spectra, normalization_method)
+```
+
+
+```{r}
+## load model
+
+m <- "gram"
+
+if (m == "gram") {
+  load(gsub("\\\\", "/", r"(C:\Users\Jacob\OneDrive - Baylor College of Medicine\Documents\Manoj\Microbial-Project\outputs\ratio-lasso_gram_featurelist_2025-11-03\2025-11-03_14.55_ratio-lasso_gram_featurelist_files\2025-11-03_14.58_ratio-lasso_gram_featurelist_model.RData)"))
+  ytest <- class_df$V11
+} else if (m == "staphVstrep") {
+  load(gsub("\\\\", "/", r"(C:\Users\fjackobs\Box\Eberlin_Lab_BCM\Projects\Bacterial Identification\Faith_scripts\2025-11-03\2025-11-03_12.17_03a_staphVstrep_isolates_train_v3_files\2025-11-03_03a_staphVstrep_isolates_train_v3_model.RData)"))
+  ytest <- class_df$genus
+} else if(m == "species") {
+  load(gsub("\\\\", "/", r"(C:\Users\Jacob\OneDrive - Baylor College of Medicine\Documents\Manoj\Microbial-Project\outputs\ratio-lasso_species_featurelist_2025-11-03\2025-11-03_15.27_ratio-lasso_species_featurelist_files\2025-11-03_15.43_ratio-lasso_species_featurelist_model.RData)"))
+  ytest <- class_df$V12
+}
+
+trained_features <- rownames(as.matrix(coef(model, s = cvmodel$lambda.min)))
+trained_features <- trained_features[trained_features != "(Intercept)"]
+
+## Below taken from Rob rc2 script for ratio calculations prior to Lasso
+## Function to compute log ratios with bounds
+compute_needed_ratios <- function(x, trained_features, min_valid = 10) {
+  feature_splits <- strsplit(trained_features, "/")
+  numerators <- sapply(feature_splits, `[`, 1)
+  denominators <- sapply(feature_splits, `[`, 2)
+
+  n_samples <- nrow(x)
+  n_features <- length(trained_features)
+  logratios <- matrix(NA_real_, nrow = n_samples, ncol = n_features)
+
+  for (i in seq_along(trained_features)) {
+    num <- numerators[i]
+    denom <- denominators[i]
+
+    if (num %in% colnames(x) && denom %in% colnames(x)) {
+      ratio <- log(x[, num] / x[, denom])
+
+      # Identify Inf/-Inf and calculate valid values
+      neg_inf_mask <- is.infinite(ratio) & ratio < 0
+      pos_inf_mask <- is.infinite(ratio) & ratio > 0
+      ratio[neg_inf_mask | pos_inf_mask] <- NA
+
+      valid_vals <- ratio[!is.na(ratio)]
+
+      if (length(valid_vals) >= min_valid) {
+        # Bound extremes
+        q01 <- quantile(valid_vals, 0.01)
+        q99 <- quantile(valid_vals, 0.99)
+        
+      } else {
+        q01 <- quantile(valid_vals, 0.01, na.rm = TRUE)
+        q99 <- quantile(valid_vals, 0.99, na.rm = TRUE)
+      }
+      
+      ## Restore directionality of -Inf and +Inf
+      ratio[neg_inf_mask] <- q01
+      ratio[pos_inf_mask] <- q99
+      
+      logratios[, i] <- ratio
+      
+    } else {
+      # Missing features
+      logratios[, i] <- NA
+    }
+  }
+
+  colnames(logratios) <- trained_features
+  return(logratios)
+}
+xtest <- compute_needed_ratios(x = xtest, trained_features = trained_features)
+
+## Extract trained features
+missing_features <- setdiff(trained_features, colnames(xtest))
+
+## Add in missing features to match what was trained
+xtest <- as.data.frame(xtest)
+if (length(missing_features) > 0) {
+  for (x in missing_features) {
+    xtest[[x]] <- 0
+  }
+}
+xtest <- xtest[, trained_features]
+xtest <- as.matrix(xtest)
+```
+
+```{r}
+test_p <- predict(model,
+                  as.matrix(xtest),
+                  s = cvmodel$lambda.min, ## Value of the penalty parameter lambda at which predictions are required
+                  type = "response" ) ## to get prediction values rather than linker function values
+
+if (m %in% c("gram","staphVstrep")) {
+  test_p <- test_p[,1]
+  test_p_thresh <- ifelse(test_p < best_threshold, classes[1], classes[2])
+  test_p_class <- as.vector(test_p_thresh)
+} else if (m == "species") {
+  test_p <- test_p[,,1]
+  test_p_class <- apply(test_p, 1, which.max)
+  test_p_class <- factor(test_p_class,levels=as.character(1:length(classes)),labels = classes)
+} 
+
+
+test_cm <- table(True=ytest,
+                 Predict=test_p_class)
+
+test_df <- data.frame(true_class=ytest, 
+                      prediction_class=test_p_class, 
+                      probability=test_p) %>%
+  rownames_to_column(var = "file_name")
+
+test_wrong_preds <- test_df %>%
+  filter(true_class != prediction_class)
+```
+
