@@ -68,7 +68,7 @@ library(ggrepel)
 
 ```{r user input}
 ## Full path to folder with sample files (excel or csv, or raw Thermo files)
-sample_dir <- gsub("\\\\", "/", r"(C:\Users\Jacob\OneDrive - Baylor College of Medicine\Documents\Manoj\Microbial-Project\Data\Match Normal muscle vs 3+ Infected)")
+sample_dir <- gsub("\\\\", "/", r"(C:\Users\Jacob\OneDrive - Baylor College of Medicine\Documents\Manoj\Microbial-Project\Data\Match Normal vs 3+ Infected)")
 
 ## Full path to feature list, otherwise NA
 feature_file <- gsub("\\\\", "/", r"(C:\Users\Jacob\OneDrive - Baylor College of Medicine\Documents\Manoj\Microbial-Project\Data\ratio_plot_feature-list.xlsx)")
