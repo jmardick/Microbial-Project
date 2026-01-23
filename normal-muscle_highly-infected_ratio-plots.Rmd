@@ -294,14 +294,14 @@ ratio_plots <- imap(ratio_list, function(df, ratio_nm) {
     filter(is.finite(ratio)) # Removes NA (Including Inf and -Inf from above ratio_df code)
 
   ## Split by class
-  muscle_df  <- df2 %>% filter(class == "Uninfected Muscle")
-  species_df <- df2 %>% filter(class != "Uninfected Muscle")
+  muscle_df  <- df2 %>% filter(class == "Uninfected Tissue")
+  species_df <- df2 %>% filter(class != "Uninfected Tissue")
 
   ## Define colors
   muscle_names <- sort(unique(muscle_df$species))
   species_names <- sort(unique(species_df$species))
 
-  muscle_cols  <- c("red", "blue")[seq_along(muscle_names)]
+  muscle_cols  <- c("magenta4", "red", "blue")[seq_along(muscle_names)]
   # species_cols <- viridisLite::viridis(length(species_names), option = "H")
 
   ## Define y-axis breaks
@@ -340,7 +340,7 @@ ratio_plots <- imap(ratio_list, function(df, ratio_nm) {
       stroke = 0
     ) +
     scale_fill_manual(
-      name = "Uninfected Muscle Type",
+      name = "Uninfected Tissue Type",
       values = setNames(muscle_cols, muscle_names),
       guide = guide_legend(
         override.aes = list(
@@ -381,7 +381,7 @@ ratio_plots <- imap(ratio_list, function(df, ratio_nm) {
         stat_compare_means(
           data = df2,
           method = "wilcox.test",
-          comparisons = list(c("Uninfected Muscle", "Highly Infected Tissue")),
+          comparisons = list(c("Uninfected Tissue", "Highly Infected Tissue")),
           label = "p.format",
           label.x = 1.5,
           label.y = max(df2$ratio, na.rm = TRUE) * 1.02,
@@ -403,7 +403,7 @@ ratio_plots <- imap(ratio_list, function(df, ratio_nm) {
     scale_x_discrete(
       labels = c(
         "Highly Infected Tissue" = "Highly Infected",
-        "Uninfected Muscle" = "Uninfected"
+        "Uninfected Tissue" = "Uninfected"
       )
     ) +
     theme_minimal(base_size = 20) +
@@ -479,46 +479,46 @@ d_zoom <- xall_zoom %>%
 ## Select the two samples
 isolate_specimen_match <- d %>%
   filter(str_detect(sample_name,
-                    regex("1046|November-27-2024-SD-24-263-smoothmuscle",
+                    regex("1046|95522A1_Normal_DCIS_19Aug24_a1_SNredo",
                           ignore_case = TRUE))) %>%
   mutate(
     patient_id = case_when(
       str_detect(sample_name, "1046") ~ "1046",
-      str_detect(sample_name, "November-27-2024-SD-24-263-smoothmuscle") ~ "SD-24-263",
+      str_detect(sample_name, "95522A1_Normal_DCIS_19Aug24_a1_SNredo") ~ "95522A1",
       TRUE ~ "oops"
     ),
     sample_type = ifelse(str_detect(sample_name, "1046"),
-                         "Infected Tissue", "Uninfected Muscle"),
+                         "Infected Breast", "Uninfected Breast"),
     zoom = "Full Spectrum"
   )
 
 isolate_specimen_match1 <- d1 %>%
   filter(str_detect(sample_name,
-                    regex("1046|November-27-2024-SD-24-263-smoothmuscle",
+                    regex("1046|95522A1_Normal_DCIS_19Aug24_a1_SNredo",
                           ignore_case = TRUE))) %>%
   mutate(
     patient_id = case_when(
       str_detect(sample_name, "1046") ~ "1046",
-      str_detect(sample_name, "November-27-2024-SD-24-263-smoothmuscle") ~ "SD-24-263",
+      str_detect(sample_name, "95522A1_Normal_DCIS_19Aug24_a1_SNredo") ~ "95522A1",
       TRUE ~ "oops"
     ),
     sample_type = ifelse(str_detect(sample_name, "1046"),
-                         "Infected Tissue", "Uninfected Muscle"),
+                         "Infected Breast", "Uninfected Breast"),
     zoom = "Full Spectrum"
   )
 
 isolate_specimen_match_zoom <- d_zoom %>%
   filter(str_detect(sample_name,
-                    regex("1046|November-27-2024-SD-24-263-smoothmuscle",
+                    regex("1046|95522A1_Normal_DCIS_19Aug24_a1_SNredo",
                           ignore_case = TRUE))) %>%
   mutate(
     patient_id = case_when(
       str_detect(sample_name, "1046") ~ "1046",
-      str_detect(sample_name, "November-27-2024-SD-24-263-smoothmuscle") ~ "SD-24-263",
+      str_detect(sample_name, "95522A1_Normal_DCIS_19Aug24_a1_SNredo") ~ "95522A1",
       TRUE ~ "oops"
     ),
     sample_type = ifelse(str_detect(sample_name, "1046"),
-                         "Infected Tissue", "Uninfected Muscle"),
+                         "Infected Breast", "Uninfected Breast"),
     zoom = "Ratio Peaks Region"
   )
 
@@ -540,8 +540,8 @@ dd1 <- dd1 %>%
   mutate(
     facet_col = paste0(patient_id, " - ", sample_type),
     facet_col = factor(facet_col,
-                       levels = c("1046 - Infected Tissue",
-                                  "SD-24-263 - Uninfected Muscle")),
+                       levels = c("1046 - Infected Breast",
+                                  "95522A1 - Uninfected Breast")),
     annot2 = ifelse(!is.na(annot),
                     paste0("bold('", annot, "')"),
                     NA_character_),
@@ -671,7 +671,7 @@ p3
 
 ``` {r save figure 4}
 ## Add panel-C title
-title_C <- bquote(bold("C. Mass spectra of infected tissue and uninfected muscle and their ratio-defining peaks"))
+title_C <- bquote(bold("C. Mass spectra of infected and uninfected breast tissue with their ratio-defining peaks"))
 p3 <- p3 + ggtitle(title_C) +
   theme(plot.title.position = "plot",
         plot.title = element_text(hjust = 0, size = 18.5, face = "bold"))
