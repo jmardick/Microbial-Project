@@ -80,7 +80,7 @@ library(scales) ## for integer y-axis on histogram
 sample_dir <- gsub("\\\\", "/", r"(C:\Users\Jacob\Box\Eberlin_Lab_BCM\People\MANOJ\Renamed_Gram_positive_Gram_negative_Isolates_May2025\Excel files)")
 
 ## Full path to feature list, otherwise NULL
-feature_file <- gsub("\\\\", "/", r"(C:\Users\Jacob\Box\Eberlin_Lab_BCM\Projects\Bacterial Identification\feature_peak_lists\Master Feature List July_2025_dedup-formulacorrected-20251111.csv)")
+feature_file <- gsub("\\\\", "/", r"(C:\Users\Jacob\Box\Eberlin_Lab_BCM\People\MANOJ\Renamed_Gram_positive_Gram_negative_Isolates_May2025\Manuscript_Microbes_Jan_2026\tentative_PNAS_Microbes_Supplementary_Data_14_Feb_2026.xlsx)")
 
 ## Full path to background peak list, otherwise NULL
 background_file <- NULL
@@ -318,10 +318,11 @@ if (peak_alignment_method == "featurelist") {
   }else{
     
     ## Read file with feature peaks
-    feature_df <- read_xlsx(feature_file, sheet = "Sheet5-Species", skip = 1)
-    feature_df <- feature_df %>% filter(`Feature (m/z)` != "Intercept")
-    feature_peaks <- unlist(feature_df[,1])
-    feature_peaks <- as.numeric(feature_peaks)
+    feature_df <- read_xlsx(feature_file, sheet = "Sheet1", skip = 1)
+    feature_peaks <- feature_df %>%
+      filter(annotation_method == "MS2") %>%
+      pull(mz) %>%
+      as.numeric()
     
     ## Feature mz plus/minus instrument mass error, round to 3 decimal places
     mass_error <- unlist((ppm_error * feature_peaks)/1e6)
