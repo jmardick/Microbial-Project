@@ -291,7 +291,13 @@ ratio_plots <- imap(ratio_list, function(df, ratio_nm) {
   
   ## Filter out non-finite ratios
   df2 <- df %>%
-    filter(is.finite(ratio)) # Removes NA (Including Inf and -Inf from above ratio_df code)
+    filter(is.finite(ratio)) %>% # Removes NA (Including Inf and -Inf from above ratio_df code)
+    mutate(
+      species = factor(
+        species,
+        levels = c(sort(setdiff(unique(species), "Polymicrobial")), "Polymicrobial")
+      )
+    )
 
   ## Split by class
   muscle_df  <- df2 %>% filter(class == "Uninfected Tissue")
