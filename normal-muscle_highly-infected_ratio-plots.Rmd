@@ -439,7 +439,7 @@ ratio_plots <- imap(ratio_list, function(df, ratio_nm) {
 
 ``` {r combined figure}
 title_A <- bquote(bold("A. Ratios of " * bolditalic("m/z") * " 747.518 : " * bolditalic("m/z") * " 748.528"))
-title_B <- bquote(bold("B. Ratios of " * bolditalic("m/z") * " 748.528 : " * bolditalic("m/z") * " 749.532"))
+title_B <- bquote(bold("B. Ratios of " * bolditalic("m/z") * " 748.528 : " * bolditalic("m/z") * " 749.534"))
 
 p1 <- ratio_plots[["m/z 747.518 / m/z 748.528"]] + ggtitle(title_A) +
   theme(plot.title = element_text(hjust = 0, size = 18.5))
@@ -541,9 +541,11 @@ isolate_specimen_match1 <- merge(isolate_specimen_match1, mol,
                                  by = "mz", all.x = TRUE)
 dd1 <- merge(dd1, mol, by = "mz", all.x = TRUE)
 
+
 ## Build labeling columns
 dd1 <- dd1 %>%
   mutate(
+    mz = ifelse(mz == 749.532, 749.534, mz),
     facet_col = paste0(patient_id, " - ", sample_type),
     facet_col = factor(facet_col,
                        levels = c("1046 - Infected Breast",
