@@ -71,13 +71,14 @@ library(scales) ## for integer y-axis on histogram
 
 ```{r user input}
 ## processing settings and model file
-model_path <- gsub("\\\\", "/", r"(C:\Users\Jacob\OneDrive - Baylor College of Medicine\Documents\Manoj\Microbial-Project\outputs\ratio-lasso_gram_featurelist_2025-11-21\2025-11-21_11.50_ratio-lasso_gram_featurelist_files\2025-11-21_11.50_ratio-lasso_gram_featurelist_model.RData)")
+model_path <- gsub("\\\\", "/", r"(C:\Users\Jacob\OneDrive - Baylor College of Medicine\Documents\Manoj\Microbial-Project\outputs\ratio-lasso_gram_featurelist_2026-02-17\2026-02-17_11.50_ratio-lasso_gram_featurelist_files\2026-02-17_11.51_ratio-lasso_gram_featurelist_model.RData)")
+load(model_path)
 
 ## Full path to folder with sample files (excel or csv, or raw Thermo files)
 sample_dir <- gsub("\\\\", "/", r"(C:\Users\Jacob\Box\Eberlin_Lab_BCM\People\MANOJ\Renamed_Gram_positive_Gram_negative_Isolates_May2025\Highly Infected sample\Extracted Data excel sheet)")
 
 ## Full path to feature list, otherwise NULL
-feature_file <- gsub("\\\\", "/", r"(C:\Users\Jacob\Box\Eberlin_Lab_BCM\Projects\Bacterial Identification\feature_peak_lists\Master Feature List July_2025_dedup-formulacorrected-20251111.csv)")
+feature_file <- gsub("\\\\", "/", r"(C:\Users\Jacob\Box\Eberlin_Lab_BCM\People\MANOJ\Renamed_Gram_positive_Gram_negative_Isolates_May2025\Manuscript_Microbes_Jan_2026\tentative_PNAS_Microbes_Supplementary_Data_14_Feb_2026.xlsx)")
 ```
 
 ```{r create directory for output files, include = FALSE}
@@ -96,27 +97,45 @@ if(!file.exists(files_dir)) {
   }
 ```
 
-```{r classes sample_file_ext and fixed_objects}
-load(model_path)
+```{r model parameters}
+model_env <- new.env()
+load(model_path, envir = model_env)
+
+model_classes <- model_env$classes
+mass_range <- model_env$mass_range
+peak_alignment_method <- model_env$peak_alignment_method
+filtered_mz <- model_env$filtered_mz
+ppm_error <- model_env$ppm_error
+normalization_method <- model_env$normalization_method
+model <- model_env$model
+cvmodel <- model_env$cvmodel
+```
+
+```{r file extension}
+classes_path <- gsub(file.path(sample_dir, "/"), "", list.dirs(sample_dir)[c(-1)], fixed=TRUE)
+
+classes <- strsplit(classes_path, "/")
+classes <- classes[lapply(classes,length)==1]
+classes_idx <- classes %in% model_classes
+classes <- classes[classes_idx]
+
+classes_path <- lapply(classes, function(x) paste(x, collapse = '/'))
+
+classes <- sapply(classes, `[`, 1)
+classes <- unique(classes)
+classes <- classes[!is.na(classes)]
+classes <- trimws(classes)
+
+names(classes_path) <- classes
 
 ## check file extension
-sample_file_ext <- unique(unlist(
-  lapply(classes, function(x) 
-    tools::file_ext(list.files(file.path(sample_dir, "/",x,"/"))))))[1]
-
-## file extension
 sample_file_ext <- "xlsx"
-
-## fixed objects for exporting to parallel computing
-fixed_objects <- list(mass_range = mass_range)
 ```
 
 ```{r file and sample names}
 ## file names
-file_name_list <- lapply(classes, function(x) 
-  list.files(path = file.path(sample_dir,x), pattern = paste0("*.", sample_file_ext), full.names = TRUE,
-             #recursive = FALSE))
-             recursive = TRUE))
+file_name_list <- lapply(classes_path, function(x) 
+  list.files(path = file.path(sample_dir,x), pattern = paste0("*.", sample_file_ext), full.names = TRUE, recursive = TRUE))
 
 ## Ensure patient ordering is consistent across different OSes.
 file_name_list <- lapply(file_name_list, sort)
@@ -126,9 +145,12 @@ sample_names_list <- lapply(file_name_list, function(x) tools::file_path_sans_ex
 names(sample_names_list) <- classes
 sample_names <- unlist(sample_names_list)
 sample_names_df <- purrr::map_df(sample_names_list, ~as.data.frame(.x), .id="id")
-file_name_df <- purrr::map_df(file_name_list, ~as.data.frame(.x), .id="id")
-sample_names_df <- cbind(substr(sample_names, 1, 4), sample_names_df, file_name_df[2])
-colnames(sample_names_df) <- c("sample_id", "class", "sample_name", "file_name")
+colnames(sample_names_df) <- c("class", "sample_name")
+```
+
+```{r}
+## fixed objects for exporting to parallel computing
+fixed_objects <- list(mass_range = mass_range)
 ```
 
 ```{r csv data}
@@ -398,10 +420,11 @@ if (peak_alignment_method == "clustering") {
   }else{
     
     ## Read file with feature peaks
-    feature_df <- read_xlsx(feature_file, sheet = "Sheet5-Species", skip = 1)
-    feature_df <- feature_df %>% filter(`Feature (m/z)` != "Intercept")
-    feature_peaks <- unlist(feature_df[,1])
-    feature_peaks <- as.numeric(feature_peaks)
+    feature_df <- read_xlsx(feature_file, sheet = "Sheet1", skip = 1)
+    feature_peaks <- feature_df %>%
+      filter(annotation_method == "MS2") %>%
+      pull(mz) %>%
+      as.numeric()
     
     ## Feature mz plus/minus instrument mass error, round to 3 decimal places
     mass_error <- unlist((ppm_error * feature_peaks)/1e6)
