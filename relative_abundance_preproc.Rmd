@@ -1,0 +1,289 @@
+---
+title: "<span style='text-align: left;font-size: 25px;'>Culture-free Identification of Bacterial Infections</span>"
+subtitle: "<span style='font-size: 20px;'>Data Pre-processing of Analyses Collected from Isolates</span>"
+author: "<span style='font-size: 17px;'>`r Sys.info()[['user']]`</span><br><span style='font-size: 12px; color:#696969;'>Eberlin Lab, Department of Surgery<br>Baylor College of Medicine</span>"
+date: "<span style='font-size: 15px; color: black;'>`r format(Sys.time(), '%B %d, %Y %H:%M')`</span>"
+knit: (function(inputFile, encoding) { 
+      proj_name <- tools::file_path_sans_ext(basename(inputFile));
+      out_dir <- file.path("outputs", paste0(proj_name, "_", Sys.Date()));
+      if(!file.exists(out_dir)) {   dir.create(out_dir) };
+      rmarkdown::render(inputFile,
+                        encoding=encoding, 
+                        output_file=file.path(dirname(inputFile), 
+                        out_dir, 
+                        paste0(format(Sys.time(), "%Y-%m-%d_%H.%M"),"_", proj_name, ".html"))) 
+                        })
+output: 
+  html_document:
+    keep_md: yes
+    toc: false
+geometry: margin=0.5in
+editor_options: 
+  markdown: 
+    wrap: 72
+---
+
+```{=html}
+<style type="text/css">
+.main-container {
+max-width: 1600px;
+margin-left: auto;
+margin-right: auto;
+}
+</style>
+```
+
+```{css, echo=FALSE}
+h1, h2, h3, h4, h5 {
+font-size: 20px;
+}
+
+h1, h2, h3, h4, h5, p {
+text-align: center;
+}
+```
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(message = FALSE, warning = FALSE, echo = FALSE, cache = FALSE, results = "hold")
+```
+
+```{r libraries, message = FALSE, warning = FALSE}
+library(rmarkdown)
+library(knitr)
+library(kableExtra)
+library(ggpubr)
+
+library(tidyverse)
+library(reshape2)
+library(readxl)
+library(rawrr)
+library(sqldf)
+library(tools)
+library(data.table)
+
+library(stringr)
+library(doParallel)
+library(fcluster)
+library(eberlinfuncs)
+
+library(caret) ## automates supervised learning (predictive modeling)
+library(glmnet) ## for training, cross validation, and testing model
+library(pROC) ## for plotting ROC curve
+library(scales) ## for integer y-axis on histogram
+
+library(officer)
+library(flextable)
+```
+
+```{r user input}
+## Full path to folder with sample files (excel or csv, or raw Thermo files)
+sample_dir <- gsub("\\\\", "/", r"(C:\Users\Jacob\Box\Eberlin_Lab_BCM\People\MANOJ\Renamed_Gram_positive_Gram_negative_Isolates_May2025\Excel files)")
+
+## Full path to feature list, otherwise NA
+feature_file <- gsub("\\\\", "/", r"(C:\Users\Jacob\Box\Eberlin_Lab_BCM\Projects\Bacterial Identification\feature_peak_lists\Master Feature List July_2025_dedup-formulacorrected-20251111.csv)")
+
+## Full path to background peak list, otherwise NA
+background_file <- NA
+
+SNR_thresh <- NULL
+
+ppm_error <- 5
+
+mass_range <- c(100,1000)
+
+## Peak Alignment Method: "clustering", "binning", or "featurelist"
+peak_alignment_method <- "featurelist"
+
+## If peak alignment method is "clustering": height at which to cut dendrogram to determine clusters
+clust_h <- 0.01 
+
+## Normalization Method: "tic", "maxpeak", "median", "medianlog", or "none"
+normalization_method <- "tic" 
+
+## ----FOR LASSO MODELS-----
+train_fraction <- 0.7
+seed <- 1234
+```
+
+```{r create directory for output files, include = FALSE}
+proj_name <- tools::file_path_sans_ext(basename(rstudioapi::getSourceEditorContext()$path))
+
+out_dir <- file.path("outputs", paste0(proj_name, "_", Sys.Date()))
+
+if(!file.exists(out_dir)) {   
+  dir.create(out_dir, recursive = TRUE) 
+  }
+
+files_dir <- file.path(out_dir, paste0(format(Sys.time(), "%Y-%m-%d_%H.%M"), "_", proj_name, "_files"))
+
+if(!file.exists(files_dir)) {   
+  dir.create(files_dir, recursive = TRUE) 
+  }
+```
+
+```{r class_df}
+class_df <- pull_classes(sample_dir)
+class_df <- class_df %>%
+  mutate(genus = sapply(str_split(class_df$V11, " "), '[[', 1)) %>%
+  relocate(genus, .after = V10)
+
+## class_df$sample_name <- class_df[cbind(1:nrow(class_df), max.col(!is.na(class_df), ties.method = 'last'))]
+
+spec <- process_ms_files(sample_dir, ppm = ppm_error, mass_range = mass_range)
+```
+
+```{r peak alignment clustering}
+## If peak alignment method is clustering
+if (peak_alignment_method == "clustering") {
+  
+  ## Handling of multiple intensities aggregating to one cluster centroid: "sumints" or "maxint"
+  clust_int_method  <-  "sumints" 
+  
+  ## Make vector of all sample m/z
+  all_mz <- sort(unlist(
+    lapply(spectra_list, function(y)
+      lapply(y, function(x)
+        round(x$mass, 3)))))
+  
+  names(all_mz) <- all_mz
+  
+  ## Cluster peaks into centroids
+  tree <- fcluster(all_mz)
+  clust_mz <- fcutree(all_mz, tree, h=clust_h)
+  clustMZ <- sort(clust_mz$cen)
+  
+  ## Match cluster centroids to sample peaks
+  clusterMatrixList <- lapply(spectra_list, function(x, y, z, w) 
+    get_cluster_matrix(x, y, z, w), y=clustMZ, z = clust_h, w = clust_int_method)
+  
+  preprocList <- lapply(clusterMatrixList, function(x) as.matrix(get_data_matrix_clustering(x)))
+  
+  aligned_spectra <- do.call(rbind, preprocList)
+  
+  colnames(aligned_spectra) <- clustMZ
+  rownames(aligned_spectra) <- sample_names
+  
+  ## FILTER #3: REMOVE RARE/UNCOMMON PEAKS PRESENT < 10% SAMPLES
+  mz_count_filter <- colSums(aligned_spectra != 0) > as.integer(nrow(aligned_spectra)*0.10)
+  aligned_spectra <- aligned_spectra[, mz_count_filter]
+  
+  filtered_mz <- clustMZ[mz_count_filter]
+  
+  ## Which sample peaks form the clusters
+  clusters_df <- data.frame(cluster_id = clust_mz$cluster_index,
+                            all_mz = all_mz)
+  
+  temp_a <- data.frame(clust_centroid = clust_mz$centroid, 
+                       cluster_id = unique(clust_mz$cluster_index)[order(unique(clust_mz$cluster_index))])
+  
+  clusters_df <- merge(clusters_df, temp_a, by = "cluster_id")
+  rm(temp_a)
+  
+  ## Remove duplicate rows of same cluster, mz, and centroid
+  clusters_df <- clusters_df[!duplicated(clusters_df), ]
+  
+  ## only keep filtered_mz in min_max_clusters df
+  clusters_df <- clusters_df[which(clusters_df$clust_centroid %in% filtered_mz), ]
+  
+  ## min and max for each centroid
+  clusters_df <- clusters_df %>%
+    group_by(cluster_id) %>%
+    summarise(
+      centroid = first(clust_centroid),
+      min_mass = min(all_mz),
+      max_mass = max(all_mz)
+    )
+  
+  ## FILTER #4: REMOVE BACKGROUND PEAKS (IF BACKGROUND FILE PRESENT)
+  if (!is.na(background_file)) {
+    
+    ## Check file extension
+    if (file_ext(background_file) == "xlsx") {
+      bg_mz <- data.frame(mass = unlist(read_excel(background_file)))
+    } else if (file_ext(background_file) == "csv") {
+      bg_mz <- data.frame(mass = unlist(read.csv(background_file, header = TRUE)))
+    } else {
+      print("Background file extension not recognized")
+    }
+    
+    ## match bg_mz to cluster centroid
+    bg_centroids <- sqldf("SELECT clusters_df.centroid, bg_mz.*
+          FROM bg_mz,clusters_df
+          WHERE bg_mz.mass BETWEEN clusters_df.min_mass AND clusters_df.max_mass")
+    
+    ## Remove peaks from aligned_spectra that are in bg_mz_centroid
+    bg_ind <- which(filtered_mz %in% unique(bg_centroids$centroid))
+    
+    filtered_mz <- filtered_mz[-c(bg_ind)]
+    aligned_spectra <- aligned_spectra[, -c(bg_ind)]
+    
+    ## only keep filtered_mz in min_max_clusters df
+    clusters_df <- clusters_df[which(clusters_df$centroid %in% filtered_mz), ]
+  }
+}
+```
+
+```{r peak alignment binning}
+if (peak_alignment_method == "binning") {
+  features <- mode_binning(spectra_list = spec)
+  feature_mean_or_mode <- "mean"
+  aligned_spectra <- bin_spectra(spectra_list = spec, features, type = feature_mean_or_mode, class_df = class_df)
+  filtered_mz <- switch(feature_mean_or_mode,
+                        mean = features$mean_mz,
+                        mode = features$mode_mz)
+}
+```
+
+```{r peak alignment feature list}
+if (peak_alignment_method == "featurelist") {
+  
+  #features <- unlist(read_excel(feature_file, col_names = TRUE)[,1])
+  features <- read.csv(feature_file)[,1]
+  
+  ## subset features between mass range
+  features <- features[features >= mass_range[1] & features <= mass_range[2]]
+  
+  matched_spec <-  target_mz_alignment(spectra_list = spec, target_mz = features, ppm = ppm_error, handle_dups = "sum")
+  
+  aligned_spectra <- bind_rows(matched_spec, .id = "sample_name") %>%
+    pivot_wider(names_from = target_mz, values_from = intensity, values_fill = 0) %>%
+    column_to_rownames(var = "sample_name")
+  
+  filtered_mz <- features
+}
+```
+
+```{r normalization}
+xall <- normalize_pixel(aligned_spectra, normalization_method)
+```
+
+```{r}
+sample_names_df <- read.csv("Data/sample_names_df.csv")
+
+class_df$patient <- sample_names_df$patient[match(class_df$V13, sample_names_df$sample_name)]
+
+test_count <- round(table(class_df$V11)*(1-train_fraction),0)
+
+test_index <- vector()
+for (c in unique(class_df$V11)){
+  set.seed(seed)
+  test_index <- c(test_index, sample(which(class_df$V11 == c & is.na(class_df$patient)), 
+                                     size = test_count[c]))
+}
+
+train_index <- (1:nrow(sample_names_df))[-test_index]
+
+class_df$train_test_set <- ifelse(rownames(class_df) %in% train_index, "train", "test")
+
+## test on isolates of matched specimens 1046, 1275, 1277, 1359, 1063
+class_df$train_test_set[which(class_df$patient %in% c(1046, 1275, 1277, 1359, 1063))] <- "test"
+train_index <- which(class_df$train_test_set == "train")
+
+xtrain <- xall[train_index, ] ## create training set
+xtest <- xall[-train_index, ] ## create testing set
+```
+
+```{r}
+save(list = ls(), file = file.path(files_dir, paste0(Sys.Date(), "_", peak_alignment_method, "_processed_bacterial_isolates.RData")))
+```
+
