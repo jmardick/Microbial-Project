@@ -1,0 +1,546 @@
+---
+title: "<span style='text-align: left;font-size: 25px;'>Culture-free Identification of Bacterial Infections</span>"
+subtitle: "<span style='font-size: 20px;'>Data Pre-processing of Analyses Collected from Isolates</span>"
+author: "<span style='font-size: 17px;'>`r Sys.info()[['user']]`</span><br><span style='font-size: 12px; color:#696969;'>Eberlin Lab, Department of Surgery<br>Baylor College of Medicine</span>"
+date: "<span style='font-size: 15px; color: black;'>`r format(Sys.time(), '%B %d, %Y %H:%M')`</span>"
+knit: (function(inputFile, encoding) { 
+      proj_name <- tools::file_path_sans_ext(basename(inputFile));
+      out_dir <- file.path("outputs", paste0(proj_name, "_", Sys.Date()));
+      if(!file.exists(out_dir)) {   dir.create(out_dir) };
+      rmarkdown::render(inputFile,
+                        encoding=encoding, 
+                        output_file=file.path(dirname(inputFile), 
+                        out_dir, 
+                        paste0(format(Sys.time(), "%Y-%m-%d_%H.%M"),"_", proj_name, ".html"))) 
+                        })
+output: 
+  html_document:
+    keep_md: yes
+    toc: false
+geometry: margin=0.5in
+editor_options: 
+  markdown: 
+    wrap: 72
+---
+
+```{=html}
+<style type="text/css">
+.main-container {
+max-width: 1600px;
+margin-left: auto;
+margin-right: auto;
+}
+</style>
+```
+
+```{css, echo=FALSE}
+h1, h2, h3, h4, h5 {
+font-size: 20px;
+}
+
+h1, h2, h3, h4, h5, p {
+text-align: center;
+}
+```
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(message = FALSE,
+                      warning = FALSE,
+                      echo = FALSE,
+                      cache = FALSE,
+                      results = "hold")
+```
+
+```{r libraries, message = FALSE, warning = FALSE}
+library(knitr)
+library(tidyverse)
+library(data.table)
+library(ranger)
+library(doParallel)
+library(caret) ## automates supervised learning (predictive modeling)
+library(pROC) ## for plotting ROC curve
+```
+
+```{r user input}
+load(gsub("\\\\", "/", r"(outputs\relative_abundance_preproc_2026-03-02\2026-03-02_11.50_relative_abundance_preproc_files\2026-03-02_featurelist_processed_bacterial_isolates.RData)"))
+```
+
+```{r create directory for output files, include = FALSE}
+proj_name <- tools::file_path_sans_ext(basename(rstudioapi::getSourceEditorContext()$path))
+
+out_dir <- file.path("outputs", paste0(proj_name, "_", Sys.Date()))
+
+if(!file.exists(out_dir)) {   
+  dir.create(out_dir, recursive = TRUE) 
+  }
+
+files_dir <- file.path(out_dir, paste0(format(Sys.time(), "%Y-%m-%d_%H.%M"), "_", proj_name, "_files"))
+
+if(!file.exists(files_dir)) {   
+  dir.create(files_dir, recursive = TRUE) 
+  }
+```
+
+``` {r rf filtering and settings}
+## Remove junk predictors function for xtrain
+remove_nzv <- function(x_train, x_test) {
+  nzv <- nearZeroVar(x_train)
+  if (length(nzv) > 0) {
+    x_train <- x_train[, -nzv, drop = FALSE]
+    x_test  <- x_test[,  -nzv, drop = FALSE]
+  }
+  list(x_train = x_train, x_test = x_test, nzv = nzv)
+}
+
+## Random forest control for 2 class
+ctrl <- trainControl(
+  method = "repeatedcv",
+  number = 5,
+  repeats = 5,
+  classProbs = TRUE,
+  summaryFunction = twoClassSummary,
+  savePredictions = "final",
+  allowParallel = TRUE
+)
+
+## Random forest control for multiclass
+ctrl_multi <- trainControl(
+  method = "repeatedcv",
+  number = 5,
+  repeats = 5,
+  classProbs = TRUE,
+  summaryFunction = multiClassSummary,
+  savePredictions = "final",
+  allowParallel = TRUE
+)
+
+if (!foreach::getDoParRegistered()) {
+  ## IMPORTANT: for identical results across machines, set a fixed number
+  n_workers <- 8
+  cl <- parallel::makePSOCKcluster(n_workers)
+  doParallel::registerDoParallel(cl)
+} else {
+  cl <- NULL
+}
+```
+
+``` {r reproducibility helper}
+## Helper function to create deterministic repeated-CV folds and seeds based on RF tuneGrid
+make_repro_ctrl_grid <- function(ctrl_in, y_train, tuneGrid, seed) {
+  stopifnot(is.factor(y_train))
+  
+  set.seed(seed)
+  index <- caret::createMultiFolds(y_train, k = ctrl_in$number, times = ctrl_in$repeats)
+  indexOut <- lapply(index, function(in_idx) setdiff(seq_along(y_train), in_idx))
+  
+  n_resamp <- length(index)
+  n_models <- nrow(tuneGrid)
+  
+  ctrl_out <- ctrl_in
+  ctrl_out$index <- index
+  ctrl_out$indexOut <- indexOut
+  
+  ## One integer vector per resample, length = nrow(tuneGrid)
+  set.seed(seed)
+  ctrl_out$seeds <- vector("list", length = n_resamp + 1)
+  for (i in seq_len(n_resamp)) {
+    ctrl_out$seeds[[i]] <- sample.int(1e7, n_models)
+  }
+  ctrl_out$seeds[[n_resamp + 1]] <- sample.int(1e7, 1)
+  
+  ctrl_out
+}
+
+## Create an explicit ranger tune grid
+make_ranger_grid <- function(p, tune_mtry_n = 10,
+                             splitrule = c("gini", "extratrees"),
+                             min_node = c(1, 5, 10)) {
+  ## mtry values: spread from small to ~sqrt(p)
+  mtry_vals <- unique(pmax(1, round(seq(2, sqrt(p), length.out = tune_mtry_n))))
+  expand.grid(
+    mtry = mtry_vals,
+    splitrule = splitrule,
+    min.node.size = min_node
+  )
+}
+```
+
+## Gram Classification
+
+``` {r gram rf train}
+## Gram classification factors
+ygram <- factor(class_df$V10)
+levels(ygram) <- make.names(levels(ygram))
+ygram_train <- ygram[train_index]
+ygram_test <- ygram[-train_index]
+
+## Gram classification junk removal
+tmp <- remove_nzv(xtrain, xtest)
+xtrain_rf <- tmp$x_train
+xtest_rf <- tmp$x_test
+
+## Explicit tuneGrid and ctrl
+gram_grid <- make_ranger_grid(
+  p = ncol(xtrain_rf),
+  tune_mtry_n = 10,
+  splitrule = c("gini", "extratrees"),
+  min_node = c(1, 5, 10)
+)
+ctrl_gram <- make_repro_ctrl_grid(ctrl, ygram_train, gram_grid, seed)
+
+set.seed(seed)
+gram_rf <- train(
+  x = xtrain_rf,
+  y = ygram_train,
+  method = "ranger",
+  trControl = ctrl_gram,
+  metric = "ROC",
+  tuneGrid = gram_grid,
+  importance = "permutation",
+  num.trees = 1000,
+  num.threads = 1
+)
+
+gram_rf
+plot(gram_rf)
+```
+
+``` {r gram rf test}
+gram_rf_pred_class <- predict(gram_rf, newdata = xtest_rf)
+gram_rf_pred_prob <- predict(gram_rf, newdata = xtest_rf, type = "prob")
+
+## Confusion Matrix
+cm_gram <- confusionMatrix(gram_rf_pred_class, ygram_test)
+cm_gram
+
+## ROC curve
+roc_gram <- pROC::roc(
+  response = ygram_test,
+  predictor = gram_rf_pred_prob$Gram.positive,
+  levels = rev(levels(ygram_test))
+)
+
+plot(roc_gram, 
+     print.thres="best", 
+     print.thres.best.method="youden",
+     print.auc=TRUE, 
+     auc.polygon=TRUE,
+     main = "ROC Curve")
+
+# Extract importance from ranger final model
+imp <- gram_rf$finalModel$variable.importance
+imp_df <- data.frame(
+  mz = names(imp),
+  importance = as.numeric(imp),
+  stringsAsFactors = FALSE
+)
+imp_df <- imp_df[order(-imp_df$importance), ]
+```
+
+## Staphylococcus vs Streptococcus
+
+``` {r staph rf train}
+## Staph vs Strep classification factors
+staph_idx <- class_df$genus %in% c("Staphylococcus", "Streptococcus")
+staph_rows_in_xall <- which(staph_idx)
+
+## Keep only the original train rows that are Staph/Strep
+xstaph_train <- xall[intersect(train_index, staph_rows_in_xall), , drop = FALSE]
+xstaph_test  <- xall[setdiff(staph_rows_in_xall, train_index), , drop = FALSE]
+ystaph_train <- factor(class_df$genus[intersect(train_index, staph_rows_in_xall)])
+ystaph_test  <- factor(class_df$genus[setdiff(staph_rows_in_xall, train_index)])
+
+## Remove junk predictors
+tmp_staph <- remove_nzv(xstaph_train, xstaph_test)
+xstaph_train_rf <- tmp_staph$x_train
+xstaph_test_rf  <- tmp_staph$x_test
+
+## Explicit tuneGrid and ctrl
+staph_grid <- make_ranger_grid(
+  p = ncol(xstaph_train_rf),
+  tune_mtry_n = 10,
+  splitrule = c("gini", "extratrees"),
+  min_node = c(1, 5, 10)
+)
+ctrl_staph <- make_repro_ctrl_grid(ctrl, ystaph_train, staph_grid, seed)
+
+set.seed(seed)
+staph_rf <- train(
+  x = xstaph_train_rf,
+  y = ystaph_train,
+  method = "ranger",
+  trControl = ctrl_staph,
+  metric = "ROC",
+  tuneGrid = staph_grid,
+  importance = "permutation",
+  num.trees = 1000,
+  num.threads = 1
+)
+
+staph_rf
+plot(staph_rf)
+```
+
+``` {r staph rf test}
+staph_rf_pred_class <- predict(staph_rf, newdata = xstaph_test_rf)
+staph_rf_pred_prob <- predict(staph_rf, newdata = xstaph_test_rf, type = "prob")
+
+## Confusion Matrix
+cm_staph <- confusionMatrix(staph_rf_pred_class, ystaph_test)
+cm_staph
+
+## ROC curve
+roc_staph <- pROC::roc(
+  response = ystaph_test,
+  predictor = staph_rf_pred_prob$Staphylococcus,
+  levels = rev(levels(ystaph_test))
+)
+
+plot(roc_staph, 
+     print.thres="best", 
+     print.thres.best.method="youden",
+     print.auc=TRUE, 
+     auc.polygon=TRUE,
+     main = "ROC Curve")
+
+# Extract importance from ranger final model
+imp_staph <- staph_rf$finalModel$variable.importance
+imp_staph_df <- data.frame(
+  mz = names(imp_staph),
+  importance = as.numeric(imp_staph),
+  stringsAsFactors = FALSE
+)
+imp_staph_df <- imp_staph_df[order(-imp_staph_df$importance), ]
+```
+
+## GAS vs GBS
+
+``` {r gas rf train}
+## GAS vs GBS classification factors
+gas_idx <- class_df$V11 %in% c("Streptococcus pyogenes", "Streptococcus agalactiae")
+xgas <- xall[gas_idx, , drop = FALSE]
+ygas <- factor(class_df$V11[gas_idx])
+levels(ygas) <- make.names(levels(ygas))
+
+gas_rows_in_xall <- which(gas_idx)
+
+## Keep only the original train rows that are Staph/Strep
+xgas_train <- xall[intersect(train_index, gas_rows_in_xall), , drop = FALSE]
+xgas_test  <- xall[setdiff(gas_rows_in_xall, train_index), , drop = FALSE]
+ygas_train <- factor(class_df$V11[intersect(train_index, gas_rows_in_xall)])
+levels(ygas_train) <- levels(ygas)
+ygas_test  <- factor(class_df$V11[setdiff(gas_rows_in_xall, train_index)])
+levels(ygas_test) <- levels(ygas)
+
+## Remove junk predictors
+tmp_gas <- remove_nzv(xgas_train, xgas_test)
+xgas_train_rf <- tmp_gas$x_train
+xgas_test_rf  <- tmp_gas$x_test
+
+## Explicit tuneGrid and ctrl
+gas_grid <- make_ranger_grid(
+  p = ncol(xgas_train_rf),
+  tune_mtry_n = 10,
+  splitrule = c("gini", "extratrees"),
+  min_node = c(1, 5, 10)
+)
+ctrl_gas <- make_repro_ctrl_grid(ctrl, ygas_train, gas_grid, seed)
+
+set.seed(seed)
+gas_rf <- train(
+  x = xgas_train_rf,
+  y = ygas_train,
+  method = "ranger",
+  trControl = ctrl_gas,
+  metric = "ROC",
+  tuneGrid = gas_grid,
+  importance = "permutation",
+  num.trees = 1000,
+  num.threads = 1
+)
+
+gas_rf
+plot(gas_rf)
+```
+
+``` {r gas rf test}
+gas_rf_pred_class <- predict(gas_rf, newdata = xgas_test_rf)
+gas_rf_pred_prob <- predict(gas_rf, newdata = xgas_test_rf, type = "prob")
+
+## Confusion Matrix
+cm_gas <- confusionMatrix(gas_rf_pred_class, ygas_test)
+cm_gas
+
+## ROC curve
+roc_gas <- pROC::roc(
+  response = ygas_test,
+  predictor = gas_rf_pred_prob$Streptococcus.pyogenes,
+  levels = rev(levels(ygas_test))
+)
+
+plot(roc_gas, 
+     print.thres="best", 
+     print.thres.best.method="youden",
+     print.auc=TRUE, 
+     auc.polygon=TRUE,
+     main = "ROC Curve")
+
+# Extract importance from ranger final model
+imp_gas <- gas_rf$finalModel$variable.importance
+imp_gas_df <- data.frame(
+  mz = names(imp_gas),
+  importance = as.numeric(imp_gas),
+  stringsAsFactors = FALSE
+)
+imp_gas_df <- imp_gas_df[order(-imp_gas_df$importance), ]
+```
+
+## Species
+
+``` {r species rf train}
+## Species classification factors
+yspecies <- factor(class_df$V11)
+levels(yspecies) <- make.names(levels(yspecies))
+yspecies_train <- yspecies[train_index]
+yspecies_test <- yspecies[-train_index]
+
+## Do not need to remove junk predictors b/c already performed for Gram classification
+## Explicit tuneGrid and ctrl
+species_grid <- make_ranger_grid(
+  p = ncol(xtrain_rf),
+  tune_mtry_n = 10,
+  splitrule = c("gini", "extratrees"),
+  min_node = c(1, 5, 10)
+)
+ctrl_species <- make_repro_ctrl_grid(ctrl_multi, yspecies_train, species_grid, seed)
+
+set.seed(seed)
+species_rf <- train(
+  x = xtrain_rf,
+  y = yspecies_train,
+  method = "ranger",
+  trControl = ctrl_species,
+  metric = "ROC",
+  tuneGrid = species_grid,
+  importance = "permutation",
+  num.trees = 1000,
+  num.threads = 1
+)
+
+species_rf
+plot(species_rf)
+```
+
+``` {r species rf test}
+species_rf_pred_class <- predict(species_rf, newdata = xtest_rf)
+species_rf_pred_prob <- predict(species_rf, newdata = xtest_rf, type = "prob")
+
+## Confusion Matrix
+cm_species <- confusionMatrix(species_rf_pred_class, yspecies_test)
+cm_species
+
+## ROC curve
+roc_species <- pROC::multiclass.roc(
+  response  = yspecies_test,
+  predictor = as.matrix(species_rf_pred_prob)
+)
+
+roc_species
+roc_species$auc
+
+# Extract importance from ranger final model
+imp <- species_rf$finalModel$variable.importance
+imp_df <- data.frame(
+  mz = names(imp),
+  importance = as.numeric(imp),
+  stringsAsFactors = FALSE
+)
+imp_df <- imp_df[order(-imp_df$importance), ]
+```
+
+## MSSA vs MRSA
+
+``` {r mrsa rf train}
+## MRSA vs MSSA classification factors
+mrsa_idx <- class_df$V12 %in% c("MSSA", "MRSA")
+mrsa_rows_in_xall <- which(mrsa_idx)
+
+## Keep only the original train rows that are Staph/Strep
+xmrsa_train <- xall[intersect(train_index, mrsa_rows_in_xall), , drop = FALSE]
+xmrsa_test  <- xall[setdiff(mrsa_rows_in_xall, train_index), , drop = FALSE]
+ymrsa_train <- factor(class_df$V12[intersect(train_index, mrsa_rows_in_xall)])
+ymrsa_test  <- factor(class_df$V12[setdiff(mrsa_rows_in_xall, train_index)])
+
+## Remove junk predictors
+tmp_mrsa <- remove_nzv(xmrsa_train, xmrsa_test)
+xmrsa_train_rf <- tmp_mrsa$x_train
+xmrsa_test_rf  <- tmp_mrsa$x_test
+
+## Explicit tuneGrid and ctrl
+mrsa_grid <- make_ranger_grid(
+  p = ncol(xmrsa_train_rf),
+  tune_mtry_n = 10,
+  splitrule = c("gini", "extratrees"),
+  min_node = c(1, 5, 10)
+)
+ctrl_mrsa <- make_repro_ctrl_grid(ctrl, ymrsa_train, mrsa_grid, seed)
+
+set.seed(seed)
+mrsa_rf <- train(
+  x = xmrsa_train_rf,
+  y = ymrsa_train,
+  method = "ranger",
+  trControl = ctrl_mrsa,
+  metric = "ROC",
+  tuneGrid = mrsa_grid,
+  importance = "permutation",
+  num.trees = 1000,
+  num.threads = 1
+)
+
+mrsa_rf
+plot(mrsa_rf)
+```
+
+``` {r mrsa rf test}
+mrsa_rf_pred_class <- predict(mrsa_rf, newdata = xmrsa_test_rf)
+mrsa_rf_pred_prob <- predict(mrsa_rf, newdata = xmrsa_test_rf, type = "prob")
+
+## Confusion Matrix
+cm_mrsa <- confusionMatrix(mrsa_rf_pred_class, ymrsa_test)
+cm_mrsa
+
+## ROC curve
+roc_mrsa <- pROC::roc(
+  response = ymrsa_test,
+  predictor = mrsa_rf_pred_prob$MRSA,
+  levels = rev(levels(ymrsa_test))
+)
+
+plot(roc_mrsa, 
+     print.thres="best", 
+     print.thres.best.method="youden",
+     print.auc=TRUE, 
+     auc.polygon=TRUE,
+     main = "ROC Curve")
+
+# Extract importance from ranger final model
+imp_mrsa <- mrsa_rf$finalModel$variable.importance
+imp_mrsa_df <- data.frame(
+  mz = names(imp_mrsa),
+  importance = as.numeric(imp_mrsa),
+  stringsAsFactors = FALSE
+)
+imp_mrsa_df <- imp_mrsa_df[order(-imp_mrsa_df$importance), ]
+```
+
+``` {r shutdown parallel proc}
+if (!is.null(cl)) {
+  parallel::stopCluster(cl)
+  foreach::registerDoSEQ()
+}
+```
+
+```{r}
+save(list = ls(), file = file.path(files_dir, paste0(Sys.Date(), "_", peak_alignment_method, "_random-forests_meta.RData")))
+```
