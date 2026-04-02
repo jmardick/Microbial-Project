@@ -532,6 +532,9 @@ imp_mrsa_df <- data.frame(
   stringsAsFactors = FALSE
 )
 imp_mrsa_df <- imp_mrsa_df[order(-imp_mrsa_df$importance), ]
+
+cm_mrsa_cv <- confusionMatrix(mrsa_rf$pred$pred, mrsa_rf$pred$obs)
+cm_mrsa_cv$overall["Accuracy"]
 ```
 
 ``` {r shutdown parallel proc}
