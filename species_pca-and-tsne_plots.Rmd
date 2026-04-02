@@ -53,9 +53,9 @@ load(gsub("\\\\", "/", r"(C:\Users\Jacob\OneDrive - Baylor College of Medicine\D
 
 sample_order <- rownames(xall)
 match_idx <- match(sample_order, class_df$V13)
-#yall <- class_df$V11[match_idx] ## Species classification
+yall <- class_df$V11[match_idx] ## Species classification
 #yall <- class_df$V10[match_idx] ## Gram classification
-yall <- class_df$genus[match_idx] ## Genus
+#yall <- class_df$genus[match_idx] ## Genus
 stopifnot(all(names(yall) == rownames(xall)))
 ```
 
@@ -225,11 +225,11 @@ plot7 <- ggplot(load_df, aes(x = Feature, y = abs(Loading), group = PC)) +
     plot.title = element_text(hjust = 0.5, size = 18)
   )
 
-ggsave(plot7, 
+ggsave(plot7,
        width = 12,
        height = 10,
        units = "in",
-       dpi = 300,  
+       dpi = 300,
        file = file.path(files_dir, paste0("PCA-feature-distribution.png"))
        )
 ```
@@ -239,15 +239,17 @@ library(Rtsne)
 library(pals)
 library(colorspace)
 
-# Use top 10 PCs (adjust based on the elbow)
-pca_input <- pca$x[, 1:7]
+## Use top 10 PCs (adjust based on the elbow)
+# pca_input <- pca$x[, 1:7]
+# Use all PCs
+pca_input <- pca$x
 dupe_idx <- !duplicated(pca_input)  # TRUE for rows kept
 # Remove duplicate rows
 pca_input_unique <- pca_input[dupe_idx, ]
 
 # Run t-SNE on unique inputs
 set.seed(42)
-tsne_result <- Rtsne(pca_input_unique, dims = 2, perplexity = 42, max_iter = 7000, verbose = TRUE, pca = FALSE, normalize = FALSE)
+tsne_result <- Rtsne(pca_input_unique, dims = 2, perplexity = 10, max_iter = 7000, verbose = TRUE, pca = FALSE, normalize = FALSE)
 
 # Now map the t-SNE result back
 tsne_coords <- matrix(NA, nrow = nrow(pca_input), ncol = 2)
@@ -259,21 +261,22 @@ tsne_df <- data.frame(
   Y = tsne_coords[, 2],
   class = yall
 ) |> na.omit() |>
-  mutate(class = factor(class, levels = c("Staphylococcus",
-                  "Enterococcus",
-                  "Streptococcus",
-                  "Enterobacter",
-                  "Escherichia",
-                  "Klebsiella",
-                  "Haemophilus",
-                  "Pseudomonas")))
+  # mutate(class = factor(class, levels = c("Staphylococcus",
+  #                 "Enterococcus",
+  #                 "Streptococcus",
+  #                 "Enterobacter",
+  #                 "Escherichia",
+  #                 "Klebsiella",
+  #                 "Haemophilus",
+  #                 "Pseudomonas")))
+  mutate(class = factor(class))
 
 plot6 <- ggplot(tsne_df, aes(x = X, y = Y)) +
   geom_point(aes(fill = class, color = class), shape = 21, alpha = 0.75, size = 2.5) +
   scale_fill_manual(values = genus_colors) + ## Change this based on which color scheme
   scale_color_manual(values = genus_colors) +
   theme_minimal() +
-  labs(title = "t-SNE of Pure Isolate Top 7 Principal Components", fill = "Genus", color = "Genus") +
+  labs(title = "t-SNE of Pure Isolate Principal Components", fill = "Genus", color = "Genus") +
   # guides(fill = guide_legend(override.aes = list(alpha = 1, size = 3, color = genus_colors)), color = "none") +   # increase color dot size
   theme(
     axis.title = element_blank(),
@@ -287,11 +290,11 @@ plot6 <- ggplot(tsne_df, aes(x = X, y = Y)) +
   )
 
 plot6
-ggsave(plot6, 
+ggsave(plot6,
        width = 12,
        height = 10,
        units = "in",
-       dpi = 300,  
+       dpi = 300,
        file = file.path(files_dir, paste0("pure-isolates_tsne_class.png"))
        )
 ```
