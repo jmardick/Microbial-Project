@@ -1,0 +1,344 @@
+---
+title: "XGBoost - Microbial Predictions on Clinical Samples"
+subtitle: "MRSA vs MSSA"
+author: "Jacob Mardick"
+date: "`r format(Sys.time(), '%B %d, %Y %H:%M')`"
+knit: (function(inputFile, encoding) { 
+      proj_name <- tools::file_path_sans_ext(basename(inputFile));
+      out_dir <- file.path("outputs", paste0(proj_name, "_", Sys.Date()));
+      if(!file.exists(out_dir)) {   dir.create(out_dir) };
+      rmarkdown::render(inputFile,
+                        encoding=encoding, 
+                        output_file=file.path(dirname(inputFile), 
+                        out_dir, 
+                        paste0(format(Sys.time(), "%Y-%m-%d_%H.%M"),"_", proj_name, ".html"))) 
+                        })
+
+output: 
+  html_document:
+    keep_md: yes
+    df_print: paged
+    toc: false
+geometry: margin=0.5in
+editor_options: 
+  markdown: 
+    wrap: 72
+---
+
+```{=html}
+<style type="text/css">
+.main-container {
+max-width: 1600px;
+margin-left: auto;
+margin-right: auto;
+}
+</style>
+```
+
+```{css, echo=FALSE}
+h1, h2, h3, h4, h5 {
+font-size: 20px;
+}
+
+h1, h2, h3, h4, h5, p {
+text-align: center;
+}
+```
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(message = FALSE, warning = FALSE, echo = FALSE, cache = FALSE)
+```
+
+```{r libraries, message = FALSE, warning = FALSE}
+library(knitr)
+library(kableExtra)
+library(ggpubr)
+
+library(tidyverse)
+library(readxl)
+library(sqldf)
+library(doParallel)
+library(stringr)
+library(eberlinfuncs)
+
+library(caret) ## automates supervised learning (predictive modeling)
+library(xgboost) ## xgboost
+library(bbotk)
+library(mlr3mbo)
+library(mlr3learners)
+library(data.table)
+library(future)
+library(future.apply)
+library(pROC) ## for plotting ROC curve
+library(scales) ## for integer y-axis on histogram
+```
+
+```{r user input}
+## processing settings and model file
+model_path <- gsub("\\\\", "/", r"(C:\Users\Jacob\OneDrive - Baylor College of Medicine\Documents\Manoj\Microbial-Project\outputs\xgboost_mrsa-mssa_2026-06-18\2026-06-18_14.40_xgboost_mrsa-mssa_files\2026-06-18_14.59_xgboost_mrsa-mssa_xgboost_parameters.RData)")
+
+## Full path to folder with sample files (excel or csv, or raw Thermo files)
+sample_dir <- gsub("\\\\", "/", r"(C:\Users\Jacob\Box\Eberlin_Lab_BCM\People\MANOJ\Renamed_Gram_positive_Gram_negative_Isolates_May2025\Highly Infected sample\Extracted Data excel sheet)")
+
+## Full path to feature list, otherwise NULL
+feature_file <- gsub("\\\\", "/", r"(C:\Users\Jacob\Box\Eberlin_Lab_BCM\People\MANOJ\Renamed_Gram_positive_Gram_negative_Isolates_May2025\Manuscript_Microbes_Jan_2026\tentative_PNAS_Microbes_Supplementary_Data_14_Feb_2026.xlsx)")
+```
+
+```{r create directory for output files, include = FALSE}
+proj_name <- tools::file_path_sans_ext(basename(rstudioapi::getSourceEditorContext()$path))
+
+out_dir <- file.path("outputs", paste0(proj_name, "_", Sys.Date()))
+
+if(!file.exists(out_dir)) {   
+  dir.create(out_dir, recursive = TRUE) 
+  }
+
+files_dir <- file.path(out_dir, paste0(format(Sys.time(), "%Y-%m-%d_%H.%M"), "_", proj_name, "_files"))
+
+if(!file.exists(files_dir)) {   
+  dir.create(files_dir, recursive = TRUE) 
+  }
+```
+
+### **Read in Files**
+
+```{r class_df}
+model_env <- new.env()
+load(model_path, envir = model_env)
+classes <- model_env$classes
+model <- model_env$final_model
+filtered_mz <- model_env$filtered_mz
+normalization_method <- model_env$normalization_method
+best_threshold <- model_env$best_threshold
+background_file <- model_env$background_file
+ppm_error <- model_env$ppm_error
+mass_range <- model_env$mass_range
+SNR_thresh <- model_env$SNR_thresh
+cube_root <- model_env$cube_root
+
+#load(model_path)
+class_df <- pull_classes(sample_dir)
+class_df <- class_df %>%
+  rename(Gram = V11, Species = V12, Subtype = V13, Sample = V14)
+
+class_df <- class_df %>%
+  filter(Gram != "Polymicrobial_gram-positive-and-negative") %>%
+  na.omit()
+
+mrsa_idx <- class_df$Subtype %in% c("MSSA", "MRSA")
+class_df <- class_df[mrsa_idx, , drop = FALSE]
+
+spec <- process_ms_files(sample_dir, ppm = ppm_error, mass_range = mass_range)
+```
+
+``` {r peak alignment to pan-cancer training peaks}
+## These are dummy parameters here to match up with training model. Do not change
+features <- data.frame(
+  mean_mz = filtered_mz, 
+  min = rnd_sigfigs(filtered_mz - filtered_mz * ppm_error/1e+06, ppm_error, type = "numeric"), 
+  max = rnd_sigfigs(filtered_mz + filtered_mz * ppm_error/1e+06, ppm_error, type = "numeric")
+  )
+feature_mean_or_median <- "mean"
+
+aligned_spectra <- bin_spectra(spectra_list = spec, features, type = feature_mean_or_median, class_df = class_df)
+
+## Add missing m/z's to match colnames of training matrix
+train_mz <- round(as.numeric(filtered_mz), 4)
+test_mz  <- round(as.numeric(colnames(aligned_spectra)), 4)
+missing_mz <- setdiff(train_mz, test_mz)
+for (mz in missing_mz) {
+  aligned_spectra[[as.character(mz)]] <- 0
+}
+## Reorder to match training
+aligned_spectra <- aligned_spectra[, match(train_mz, round(as.numeric(colnames(aligned_spectra)), 4)), drop = FALSE]
+```
+
+```{r yall}
+yall <- factor(class_df$Subtype)
+```
+
+```{r normalization}
+xall <- normalize_pixel(as.matrix(aligned_spectra), normalization_method)
+if (cube_root) xall <- xall^(1/3)
+```
+
+```{r Testing}
+dxall <- xgb.DMatrix(as.matrix(xall))
+
+pred_prob <- predict(model, dxall)
+```
+
+``` {r test confusion matrix}
+test_p_thresh <- ifelse(pred_prob < best_threshold, classes[1], classes[2])
+test_p_class  <- factor(test_p_thresh, levels(yall))
+
+test_cm <- table(True = yall, Predict = test_p_class)
+```
+
+``` {r test histogram}
+test_df <- data.frame(file_name        = class_df$Sample,
+                      true_class       = yall,
+                      prediction_class = test_p_class,
+                      probability      = as.numeric(pred_prob))
+
+rownames(test_df) <- NULL
+
+test_wrong_preds <- test_df %>%
+  filter(true_class != prediction_class)
+```
+
+```{r save files, include = FALSE}
+## test set files
+write.csv(test_cm, 
+          file = file.path(files_dir, "test_cm.csv"))
+
+write.csv(test_df, 
+          row.names = FALSE,
+          file.path(files_dir, "test_preds.csv"))
+
+write.csv(test_wrong_preds, 
+          row.names = FALSE,
+          file.path(files_dir, "mis_preds.csv"))
+```
+
+<br>
+
+#### **Preprocessing and Statistical Model Settings**
+
+```{r chunk3, fig.align = "center"}
+model_version <- sapply(str_split(model_path,"/"), tail, 1)
+
+settings_df <- rbind(c("SNR Threshold:", SNR_thresh),
+                     c("Mass Range:", paste0('<i>m/z</i> ', mass_range[1], " - ", mass_range[2])),
+                     c("Normalization Method:", normalization_method),
+                     c("Model Version:", model_version))
+
+classes2 <- tools::toTitleCase(gsub("_", " ", classes))
+#classes2 <- unlist(lapply(str_split(classes, pattern  = " "), tail, n = 1L)) ## If class is last element of full class name
+#classes2 <- unlist(lapply(str_split(classes, pattern  = "_"), tail, n = 1L)) ## If class is last element of full class name
+
+kable(settings_df,
+      row.names = FALSE,
+      align = "l",
+      booktabs = TRUE,
+      longtable = TRUE,
+      full_width = FALSE,
+      linesep = "")%>%
+  column_spec(1:2, width = "3in")%>% 
+  kable_styling(full_width = F)
+
+cols <- c(hue_pal()(2))
+```
+
+```{r chunk4}
+test_cm <- as.data.frame.matrix(test_cm)
+test_cm <- cbind(c("True", "True"),
+                 classes2,
+                 test_cm)
+rownames(test_cm) <- NULL
+colnames(test_cm) <- c(".", "  ", classes2)
+names(test_cm)[1] <- cell_spec(names(test_cm)[1], color = "white")
+test_accuracy <- rbind(c(paste0(classes2[1], " Recall: "), 
+                         paste0(format(round((test_cm[1,3]/rowSums(test_cm[,3:4])[1])*100, 1), nsmall = 1), "%")),
+                       c(paste0(classes2[2], " Recall: "), 
+                         paste0(format(round((test_cm[2,4]/rowSums(test_cm[,3:4])[2])*100,1), nsmall = 1), "%")),
+                       c("Overall Accuracy: ", 
+                         paste0(format(round(((test_cm[1,3] + test_cm[2,4])/sum(test_cm[, 3:4]))*100, 1), nsmall = 1), "%")))
+```
+
+<br>
+
+#### **Test Set Confusion Matrix**
+
+```{r chunk7, fig.align = "center"}
+kable(test_cm,
+      align = "c",
+      format = "html",
+      escape = FALSE) %>%
+  kable_styling(full_width = FALSE) %>%
+  add_header_above(c("", " ", "Predict" = 2)) %>%
+  column_spec(1, bold = TRUE) %>%
+  column_spec(2, bold = TRUE) %>%
+  column_spec(2:4, width = "2cm") %>%
+  collapse_rows(columns = 1) %>%
+  column_spec(3, background = "#c3fcb5")
+
+kable(test_accuracy,
+      row.names = FALSE,
+      align = "r") %>% 
+  column_spec(1, bold = TRUE) %>%
+  kable_minimal(full_width = FALSE,
+                bootstrap_options = "condensed",
+                html_font = "Calibri",
+                font_size = 16)
+```
+
+```{r chunk9, fig.width=8, fig.height=3, fig.align = "center"}
+test_plot <- ggplot(test_df, aes(x=probability, fill=true_class, color=true_class)) + 
+  geom_histogram(binwidth=0.01, alpha=0.25, position="identity",boundary=0) + 
+  ggtitle("Model Prediction Probabilities: Test Set") +
+  geom_vline(xintercept = best_threshold, linewidth = 0.75,  color = "black", linetype = "dashed") +
+  scale_x_continuous(breaks = seq(0, 1, by = 0.1), minor_breaks = seq(0, 1, by = 0.05), expand = c(0.05,0)) +
+  scale_color_manual(values = rev(cols), labels = c(classes2[1], classes2[2])) +
+  scale_fill_manual(values = rev(cols), labels = c(classes2[1], classes2[2])) +
+  labs(x = "Prediction Probability", y = "Spectra Count", color="True Class", fill = "True Class") +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+```
+
+```{r chunk10}
+## Add misclassified test samples
+test_wrong_preds <- test_df %>%
+  filter(true_class != prediction_class)
+
+test_wrong_preds <- test_wrong_preds[order(test_wrong_preds$true_class), ]
+
+test_wrong_preds$true_class <- gsub(classes[1], classes2[1], gsub(classes[2], classes2[2],test_wrong_preds$true_class))
+test_wrong_preds$prediction_class <- gsub(classes[1], classes2[1], gsub(classes[2], classes2[2],test_wrong_preds$prediction_class))
+
+test_wrong_preds$probability <- round(test_wrong_preds$probability, 3)
+```
+
+<br>
+
+#### **Test Set Misclassifications**
+
+```{r chunk12, fig.align = "center"}
+test_plot
+
+kable(test_wrong_preds,
+      col.names = c("Sample Name", "True Class", "Predicted Class", "Probability"),
+      row.names = FALSE,
+      align = "l")  %>%
+  kable_styling(position = "center", 
+                bootstrap_options = c("striped", "condensed"),
+                full_width = FALSE, 
+                font_size = 14)
+```
+
+<br>
+
+#### **Test Samples**
+
+```{r chunk13}
+## Add list of samples for training
+## Add list of samples for testing
+
+test_samples <- sort(test_df$file_name)
+
+kable(test_samples,
+      row.names = FALSE,
+      col.names = c("Sample Names"),
+      align = "l") %>%
+  kable_minimal(full_width = FALSE,
+                bootstrap_options = "condensed",
+                html_font = "Calibri",
+                font_size = 12)
+```
+
+
+#### **Session Info**
+
+```{r}
+sessionInfo()
+```
