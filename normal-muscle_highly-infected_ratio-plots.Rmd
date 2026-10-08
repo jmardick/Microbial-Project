@@ -60,8 +60,8 @@ library(readxl)
 library(stringr)
 library(doParallel)
 library(fcluster)
-library(johnfuncs)
 library(eberlinfuncs)
+library(mbpabin)
 library(ggh4x)
 library(ggrepel)
 ```
@@ -144,8 +144,9 @@ class_df <- class_df %>%
 
 ``` {r process files}
 spec <- process_ms_files(sample_dir, ppm = ppm_error, mass_range = mass_range)
+spec <- spec[class_df$V12]
 
-features <- median_binning(spectra_list = spec)
+features <- mode_ppm_bin_features(spectra_list = spec, min_samples_per_feature = p)
 feature_mean_or_median <- "mean"
 
 aligned_spectra <- bin_spectra(
@@ -388,7 +389,7 @@ ratio_plots <- imap(ratio_list, function(df, ratio_nm) {
           data = df2,
           method = "wilcox.test",
           comparisons = list(c("Uninfected Tissue", "Highly Infected Tissue")),
-          label = "p.format",
+          label = "p",
           label.x = 1.5,
           label.y = max(df2$ratio, na.rm = TRUE) * 1.02,
           size = 6
@@ -571,18 +572,11 @@ p3 <- ggplot(dd1, aes(x = as.numeric(mz), y = intensity * 100)) +
   geom_text( 
     data = distinct(dd1, facet_col), 
     aes(x = 300, y = 95, label = facet_col), 
+    inherit.aes = FALSE,
     hjust = 0, 
     size = 6, 
     fontface = "bold" 
     ) + 
-  
-  coord_cartesian(clip = "off") + 
-  ## Labels & theme 
-  labs( 
-    title = NULL, 
-    x = "", 
-    y = "Relative Intensity (%)" 
-  ) + 
   
   ## Vertical callout lines 
   geom_vline( 
@@ -594,20 +588,31 @@ p3 <- ggplot(dd1, aes(x = as.numeric(mz), y = intensity * 100)) +
   ) + 
   
   ## Mass spectrum 
-  geom_bar(stat = "identity", width = 0.001, color = "#1d1d1d") +
+  geom_linerange(
+    aes(ymin = 0, ymax = intensity * 100), 
+    linewidth = 0.4, 
+    color = "#1d1d1d"
+    ) +
   
-  theme(panel.background = element_rect(fill = "white"), 
-        panel.grid = element_blank(), 
-        panel.spacing.y = unit(1, "lines"), 
-        strip.background = element_blank(), 
-        strip.text = element_blank(), 
-        axis.line.x = element_line(linewidth = 0.2, colour = "black"), 
-        axis.line.y = element_line(linewidth = 0.2, colour = "black"), 
-        axis.ticks = element_line(linewidth = 0.2, colour = "black"), 
-        plot.background = element_rect(fill = "white"), 
-        text = element_text(size = 20),
-        legend.position = "none", 
-        plot.margin = margin(20, 20, 30, 20)) + 
+  ## Peak labels
+  geom_text_repel(
+    data = top_mz_peaks,
+    aes(
+      x = as.numeric(mz),
+      y = intensity * 100,
+      label = annot3
+    ),
+    direction = "y",
+    vjust = -0.6,
+    hjust = 0.5,
+    force = 1,
+    min.segment.length = 0,
+    na.rm = TRUE,
+    size = 5.5,
+    color = "black",
+    parse = TRUE,
+    segment.color = NA
+  ) +
   
   ## Facet layout 
   ggh4x::facet_grid2( 
@@ -617,13 +622,15 @@ p3 <- ggplot(dd1, aes(x = as.numeric(mz), y = intensity * 100)) +
   ) + 
   
   ## Independent zoom scaling 
-  facetted_pos_scales( 
+  ggh4x::facetted_pos_scales( 
     x = list( 
       zoom == "Full Spectrum" ~ scale_x_continuous( 
+        name = expression(bolditalic(m/z)),
         breaks = seq(100, 1000, by = 100), 
         expand = expansion(mult = c(0, 0), add = c(15, 5)) 
       ), 
       zoom == "Ratio Peaks Region" ~ scale_x_continuous( 
+        name = expression(bolditalic(m/z)),
         limits = c(747, 750), 
         breaks = seq(747, 750, by = 1), 
         expand = expansion(mult = c(0, 0), add = c(0.25, 0.25)) 
@@ -632,47 +639,45 @@ p3 <- ggplot(dd1, aes(x = as.numeric(mz), y = intensity * 100)) +
     y = list(
       zoom == "Full Spectrum" ~ scale_y_continuous(
         limits = c(0, 100),
-        breaks = seq(0, 100, 10),
-        expand = c(0, 0)
+        breaks = seq(0, 100, by = 10),
+        expand = expansion(mult = c(0, 0))
       ),
       zoom == "Ratio Peaks Region" ~ scale_y_continuous(
         limits = c(0, 100),
-        breaks = seq(0, 100, 20),
+        breaks = seq(0, 100, by = 20),
         expand = expansion(mult = c(0, 0), add = c(0, 10))
       )
     )
   ) + 
   
   ## Panel width ratio (full wider than zoom) 
-  force_panelsizes(cols = c(4, 2)) + 
+  ggh4x::force_panelsizes(cols = c(4, 2)) + 
   
-  geom_text_repel(data = top_mz_peaks, 
-                  aes(x = as.numeric(mz), y = intensity * 100, label = annot3),
-                  direction = "y", 
-                  vjust = -0.6, 
-                  hjust = 0.5, 
-                  force = 1, 
-                  min.segment.length = 0, 
-                  na.rm = TRUE, 
-                  size = 5.5, 
-                  color = "black", 
-                  parse = TRUE, 
-                  segment.color = NA) + 
-
-  geom_text(data = data.frame(zoom = "Full Spectrum"), 
-            x = c(NA, 500), 
-            y = -15, 
-            label = "m/z", 
-            hjust = 0.5, 
-            size = 8, 
-            fontface = "bold.italic") + 
-  geom_text(data = data.frame(zoom = "Ratio Peaks Region"), 
-            x = c(NA, 748.5), 
-            y = -15, 
-            label = "m/z", 
-            hjust = 0.5, 
-            size = 8, 
-            fontface = "bold.italic")
+  coord_cartesian(clip = "off") +
+  
+  labs(
+    title = NULL,
+    x = NULL,
+    y = "Relative Intensity (%)"
+  ) +
+  
+  theme(
+    panel.background = element_rect(fill = "white", color = NA),
+    panel.grid = element_blank(),
+    panel.spacing.y = unit(1, "lines"),
+    strip.background = element_blank(),
+    strip.text = element_blank(),
+    axis.line.x = element_line(linewidth = 0.2, color = "black"),
+    axis.line.y = element_line(linewidth = 0.2, color = "black"),
+    axis.ticks = element_line(linewidth = 0.2, color = "black"),
+    axis.title.x = element_text(size = 20, face = "bold.italic", margin = margin(t = 10)),
+    axis.title.y = element_text(size = 20),
+    axis.text = element_text(size = 16),
+    plot.background = element_rect(fill = "white", color = NA),
+    text = element_text(size = 20),
+    legend.position = "none",
+    plot.margin = margin(20, 20, 20, 20)
+  )
 
 p3
 ```
