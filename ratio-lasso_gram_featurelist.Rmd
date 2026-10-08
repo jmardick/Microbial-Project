@@ -242,7 +242,7 @@ if (peak_alignment_method == "featurelist") {
   ## subset features between mass range
   features <- features[features >= mass_range[1] & features <= mass_range[2]]
   
-  matched_spec <-  target_mz_alignment(spectra_list = spec, target_mz = features, ppm = ppm_error, handle_dups = "sum")
+  matched_spec <-  feature_list_alignment(spectra_list = spec, target_mz = features, ppm = ppm_error, handle_dups = "sum")
   
   aligned_spectra <- bind_rows(matched_spec, .id = "sample_name") %>%
     pivot_wider(names_from = target_mz, values_from = intensity, values_fill = 0) %>%
@@ -364,8 +364,8 @@ model <- glmnet(
   standardize = FALSE, ## because intensities are already in same units
   lambda.min.ratio = 1e-05 ) ## The model will compute its own lambda sequence based on nlambda and lambda.min.ratio 
 
-#nfolds <- nrow(xtrain)
-nfolds <- 10
+nfolds <- nrow(xtrain)
+# nfolds <- 10
 cvmodel <- cv.glmnet(xtrain, ytrain, nfolds = nfolds, family = "binom", type.measure = "class", standardize = F, keep = T)
 ```
 
@@ -505,24 +505,6 @@ write.csv(test_wrong_preds,
           file.path(files_dir, "misclassified_test_preds.csv"))
 ```
 
-```{r save plots, include=FALSE}
-png(filename=file.path(files_dir, "cv_plot.png"))
-plot(cvmodel)
-title("cross-validation curve : binomial family", line = 2.5)
-dev.off()
-
-png(filename=file.path(files_dir, "roc_plot.png"))
-plot(roc_curve, 
-     print.thres="best", 
-     print.thres.best.method="youden",
-     print.auc=TRUE, 
-     auc.polygon=TRUE,
-     main = "ROC Curve")
-dev.off()
-
-ggsave(roc_metrics, filename = file.path(files_dir, "roc_metrics_thresh.png"))
-```
-
 <br>
 
 #### **Preprocessing and Statistical Model Settings**
@@ -658,15 +640,25 @@ kable(test_accuracy,
 <br>
 
 ```{r roc curve report, fig.align='center', fig.width=4, fig.height=4}
-plot(roc_curve, 
-     print.thres="best", 
-     print.thres.best.method="youden",
-     print.auc=TRUE, 
-     auc.polygon=TRUE,
+png(filename = file.path(files_dir, "ROC_plot.png"),
+    width = 4, height = 4, units = "in", res = 300)
+plot(roc_curve,
+     print.thres = "best",
+     print.thres.best.method = "youden",
+     print.auc = TRUE,
+     auc.polygon = TRUE,
      main = "ROC")
+dev.off()
 ```
 
 <br>
+
+```{r cvmodel plot, fig.align='center', fig.width=4, fig.height=4}
+png(filename = file.path(files_dir, "CVmodel_plot.png"),
+    width = 5, height = 5, units = "in", res = 300)
+plot(cvmodel)
+dev.off()
+```
 
 #### **LASSO Model Predictive Feature Weights**
 
