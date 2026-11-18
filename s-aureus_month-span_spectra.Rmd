@@ -249,6 +249,65 @@ if (peak_alignment_method == "featurelist") {
 xall <- as.matrix(normalize_pixel(aligned_spectra, normalization_method))
 ```
 
+``` {r bin labels}
+## Function to find closest peak to selected label
+get_closest_peak_labels <- function(
+  data,
+  target_mz,
+  abundance_col,
+  tolerance = 0.05
+) {
+
+  abundance_col <- rlang::ensym(abundance_col)
+
+  bind_rows(
+    lapply(
+      levels(data$sample_name),
+      function(samp) {
+
+        sample_data <- data %>%
+          filter(sample_name == samp)
+
+        bind_rows(
+          lapply(
+            target_mz,
+            function(target) {
+
+              closest_peak <- sample_data %>%
+                mutate(
+                  target_mz = target,
+                  mz_difference = abs(mz - target)
+                ) %>%
+                slice_min(
+                  mz_difference,
+                  n = 1,
+                  with_ties = FALSE
+                )
+
+              ## Only retain match if within tolerance
+              closest_peak %>%
+                filter(mz_difference <= tolerance) %>%
+                transmute(
+                  sample_name,
+                  target_mz,
+                  mz,
+                  abundance = !!abundance_col,
+
+                  ## Label with actual binned m/z
+                  mz_label = sprintf("%.3f", mz),
+
+                  mz_difference
+                )
+            }
+          )
+        )
+      }
+    )
+  )
+}
+
+```
+
 ``` {r spectrum}
 ## Manually select samples
 selected_samples <- c(
@@ -378,6 +437,19 @@ spectrum_theme <- theme_classic(base_size = 14) +
     )
   )
 
+label_mz_full <- c(128.035, 146.046, 187.109, 191.020, 245.060, 693.471, 721.503)
+
+label_mz_lipid <- c(693.471, 721.503)
+
+label_tolerance <- 0.05
+
+manual_peaks_full <- get_closest_peak_labels(
+  data = dd,
+  target_mz = label_mz_full,
+  abundance_col = relative_abundance,
+  tolerance = label_tolerance
+)
+
 
 ## Left panel: complete m/z range 100-1000
 p_full <- ggplot(
@@ -397,6 +469,15 @@ p_full <- ggplot(
     color = "black",
     lineend = "butt"
   ) +
+  geom_text(
+    data = manual_peaks_full,
+    aes(x = mz, y = abundance, label = mz_label),
+    inherit.aes = FALSE,
+    hjust = 0.5,
+    vjust = -0.25,
+    size = 2.7,
+    color = "black"
+  ) +
   facet_grid(
     rows = vars(sample_name)
   ) +
@@ -407,14 +488,14 @@ p_full <- ggplot(
     expand = expansion(mult = c(0, 0))
   ) +
   scale_y_continuous(
-    limits = c(0, 105),
+    limits = c(0, 115),
     breaks = c(0, 50, 100),
     minor_breaks = NULL,
     expand = expansion(mult = c(0, 0))
   ) +
   labs(
     title = "Full Mass Spectrum",
-    x = expression(m/z),
+    x = expression(italic(m/z)),
     y = "Relative Abundance (%)"
   ) +
   coord_cartesian(
@@ -450,6 +531,13 @@ dd_lipid <- dd %>%
   ) %>%
   ungroup()
 
+manual_peaks_lipid <- get_closest_peak_labels(
+  data = dd_lipid,
+  target_mz = label_mz_lipid,
+  abundance_col = lipid_relative_abundance,
+  tolerance = label_tolerance
+)
+
 ## Right panel: enlarged lipid region m/z 600-1000
 p_lipid <- ggplot(
   dd_lipid,
@@ -482,6 +570,15 @@ p_lipid <- ggplot(
     fontface = "bold",
     color = "black"
   ) +
+  geom_text(
+    data = manual_peaks_lipid,
+    aes(x = mz, y = abundance, label = mz_label),
+    inherit.aes = FALSE,
+    hjust = 0.5,
+    vjust = -0.25,
+    size = 2.7,
+    color = "black"
+  ) +
   facet_grid(
     rows = vars(sample_name)
   ) +
@@ -492,14 +589,14 @@ p_lipid <- ggplot(
     expand = expansion(mult = c(0, 0))
   ) +
   scale_y_continuous(
-    limits = c(0, 105),
+    limits = c(0, 115),
     breaks = c(0, 50, 100),
     minor_breaks = NULL,
     expand = expansion(mult = c(0, 0))
   ) +
   labs(
     title = "Lipid Region",
-    x = expression(m/z),
+    x = expression(italic(m/z)),
     y = "Relative Abundance (%)"
   ) +
   coord_cartesian(
